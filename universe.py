@@ -1,26 +1,28 @@
 # universe.py
-# Defines the tradable universe for the SSI engine
 
 CRYPTO_SYMBOLS = [
     "BTCUSD",
     "ETHUSD",
     "SOLUSD",
     "XRPUSD",
-    "ADAUSD"
+    "ADAUSD",
 ]
 
+# Stooq FX daily symbols (no suffix)
 FOREX_SYMBOLS = [
     "EURUSD",
     "GBPUSD",
     "USDJPY",
     "AUDUSD",
-    "USDCAD"
+    "USDCAD",
 ]
 
+# Underlyings to score for “Options Lane”
+# (we’re scoring the underlying, not pulling option chains)
 OPTIONS_UNDERLYINGS = [
     "SPY",
     "QQQ",
     "IWM",
     "NVDA",
-    "TSLA"
+    "TSLA",
 ]
