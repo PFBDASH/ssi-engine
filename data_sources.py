@@ -44,3 +44,24 @@ def fetch_fx_daily(pair):
 
     # Keep last ~300 bars (enough for EMA200 + ATR)
     return df.tail(300).reset_index(drop=True)
+    # ---------- EQUITIES (FREE via Stooq daily) ----------
+def fetch_equity_daily(ticker):
+    sym = ticker.lower()
+    url = f"https://stooq.com/q/d/l/?s={sym}.us&i=d"
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+
+    from io import StringIO
+    df = pd.read_csv(StringIO(r.text))
+
+    df.rename(columns={
+        "Date": "time",
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close"
+    }, inplace=True)
+
+    df["time"] = pd.to_datetime(df["time"])
+    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
+    return df.tail(300).reset_index(drop=True)
