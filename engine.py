@@ -7,24 +7,43 @@ import yfinance as yf
 
 def _fetch_daily(symbol, days=180):
     df = yf.download(symbol, period=f"{days}d", interval="1d", progress=False)
+
     if df is None or df.empty:
         return None
 
-    # FORCE safe column names
+    # Normalize column names safely
     df.columns = [str(c).title() for c in df.columns]
     df = df.dropna()
+
     return df
+
+
+def _get_close_series(df):
+    """
+    Robustly resolve a usable close price series.
+    """
+    if "Close" in df.columns:
+        return df["Close"]
+    if "Adj Close" in df.columns:
+        return df["Adj Close"]
+    return None
 
 
 def _score_symbol(label, symbol):
     df = _fetch_daily(symbol)
-    if df is None or len(df) < 50:
+
+    if df is None or len(df) < 60:
         return None
 
-    close = df["Close"]
+    close = _get_close_series(df)
+    if close is None:
+        return None
 
-    trend = 1 if close.iloc[-1] > close.rolling(50).mean().iloc[-1] else 0
-    vol = 1 if close.pct_change().rolling(20).std().iloc[-1] > 0.02 else 0
+    ma50 = close.rolling(50).mean()
+    vol20 = close.pct_change().rolling(20).std()
+
+    trend = 1 if close.iloc[-1] > ma50.iloc[-1] else 0
+    vol = 1 if vol20.iloc[-1] > 0.02 else 0
 
     score = round((trend * 2.5) + (vol * 2.5), 2)
 
@@ -37,7 +56,7 @@ def _score_symbol(label, symbol):
 
 
 # -----------------------
-# Public scan functions
+# Public scans
 # -----------------------
 
 def run_crypto_scan():
@@ -75,7 +94,6 @@ def run_fx_scan():
 
 
 def run_options_scan():
-    # Underlyings only (options logic is recommendation-based)
     symbols = {
         "SPY": "SPY",
         "QQQ": "QQQ",
@@ -87,15 +105,16 @@ def run_options_scan():
     rows = []
     for label, sym in symbols.items():
         r = _score_symbol(label, sym)
-        if r:
-            # add options recommendation
-            if r["score"] >= 4.5:
-                r["recommendation"] = "Iron Condor (30–45 DTE)"
-            elif r["score"] >= 3.5:
-                r["recommendation"] = "Directional Call / Put (5–7 DTE)"
-            else:
-                r["recommendation"] = "No trade"
+        if not r:
+            continue
 
-            rows.append(r)
+        if r["score"] >= 4.5:
+            r["recommendation"] = "Iron Condor (30–45 DTE, ~15 delta)"
+        elif r["score"] >= 3.5:
+            r["recommendation"] = "Directional Call/Put (5–7 DTE)"
+        else:
+            r["recommendation"] = "No trade"
+
+        rows.append(r)
 
     return pd.DataFrame(rows).sort_values("score", ascending=False)
