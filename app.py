@@ -7,6 +7,7 @@ from engine import (
     run_options_scan,
     compute_ssi,
     recommend_lane,
+    recommend_options_contract
 )
 
 st.set_page_config(page_title="SSI Engine", layout="wide")
