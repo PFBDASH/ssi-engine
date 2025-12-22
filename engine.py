@@ -1,517 +1,351 @@
 # engine.py
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from universe import CRYPTO, FOREX, OPTIONS_UNDERLYINGS
+import universe
 
 
-# ---------------------------
-# CONFIG (hidden thresholds)
-# ---------------------------
-CRYPTO_REC_THRESHOLD = 7.5
-FOREX_REC_THRESHOLD = 7.0
-OPTIONS_REC_THRESHOLD = 7.0
-
-LOOKBACK_DAYS = 220  # enough for ema200 + stability
+# -----------------------------
+# Helpers
+# -----------------------------
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-@dataclass
-class ScoreRow:
-    symbol: str
-    trend: float
-    vol: float
-    score: float
-    direction: str
-    hold: str
-    rec: str
-
-
-def _now_utc_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-
-def _safe_float(x, default=0.0) -> float:
-    try:
-        if x is None:
-            return default
-        if isinstance(x, (float, int, np.floating, np.integer)):
-            return float(x)
-        return float(x)
-    except Exception:
-        return default
-
-
-def _normalize_yf_history(df: pd.DataFrame) -> pd.DataFrame:
+def _normalize_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     """
-    yfinance can return:
-    - empty df
-    - columns with lowercase
-    - MultiIndex columns in some cases
-    This normalizes to columns: Open, High, Low, Close, Volume (when available)
+    Make yfinance output consistent.
+    Handles:
+      - empty dfs
+      - MultiIndex columns (e.g. ('Close','SPY'))
+      - lowercase/uppercase variations
+    Returns columns: Open, High, Low, Close, Volume (if available)
     """
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # If MultiIndex columns, pick the first level that looks like OHLCV
+    # If MultiIndex columns, flatten by taking first level or last level as needed
     if isinstance(df.columns, pd.MultiIndex):
-        # Try to find a column level that contains 'Close'
-        # If it's like ('Close', 'SPY') we want 'Close' per column.
-        # Easiest: take the first ticker's slice if present.
+        # Usually it's like ('Close', 'SPY'). We want just 'Close'.
+        df = df.copy()
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+
+    # Standardize names
+    rename = {}
+    for c in df.columns:
+        cl = str(c).strip().lower()
+        if cl == "open":
+            rename[c] = "Open"
+        elif cl == "high":
+            rename[c] = "High"
+        elif cl == "low":
+            rename[c] = "Low"
+        elif cl in ("close", "adj close", "adjclose"):
+            # prefer Close; yfinance returns Close in history()
+            rename[c] = "Close"
+        elif cl == "volume":
+            rename[c] = "Volume"
+
+    df = df.rename(columns=rename)
+
+    needed = ["Close"]
+    for n in needed:
+        if n not in df.columns:
+            return pd.DataFrame()
+
+    # Ensure datetime index
+    if not isinstance(df.index, pd.DatetimeIndex):
         try:
-            # If 2 levels: (field, ticker) or (ticker, field)
-            lvl0 = df.columns.get_level_values(0)
-            lvl1 = df.columns.get_level_values(1)
-            # Determine which level has OHLC names
-            ohlc = {"open", "high", "low", "close", "adj close", "volume"}
-            if any(str(x).lower() in ohlc for x in set(lvl0)):
-                # columns are (field, ticker)
-                # choose first ticker
-                first_ticker = list(dict.fromkeys(lvl1))[0]
-                df = df.xs(first_ticker, axis=1, level=1)
-            elif any(str(x).lower() in ohlc for x in set(lvl1)):
-                # columns are (ticker, field)
-                first_ticker = list(dict.fromkeys(lvl0))[0]
-                df = df.xs(first_ticker, axis=1, level=0)
-            else:
-                # fallback: flatten
-                df.columns = ["_".join(map(str, c)) for c in df.columns]
+            df.index = pd.to_datetime(df.index)
         except Exception:
-            df.columns = ["_".join(map(str, c)) for c in df.columns]
+            return pd.DataFrame()
 
-    # Standardize column names
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    colmap = {c: c.title() for c in df.columns}
-    df.rename(columns=colmap, inplace=True)
-
-    # Some feeds return "Adj Close" only; keep Close if present
+    # Drop rows with no close
+    df = df.dropna(subset=["Close"])
     return df
 
 
-def _fetch_daily(yf_symbol: str, days: int = LOOKBACK_DAYS) -> pd.DataFrame:
-    df = yf.download(
-        yf_symbol,
-        period=f"{days}d",
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-        threads=False,
-    )
-    df = _normalize_yf_history(df)
-    return df
+def _fetch_history(symbol: str, days: int = 200, interval: str = "1d") -> pd.DataFrame:
+    """
+    More reliable than yf.download in Streamlit Cloud.
+    """
+    try:
+        end = _now_utc()
+        start = end - timedelta(days=days)
+        t = yf.Ticker(symbol)
+        df = t.history(start=start, end=end, interval=interval, auto_adjust=False)
+        df = _normalize_ohlc(df)
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
-def _ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
+def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50.0)
 
 
-def _atr_pct(df: pd.DataFrame, period: int = 14) -> float:
-    if df.empty or not {"High", "Low", "Close"}.issubset(df.columns):
-        return 0.0
+def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    if not {"High", "Low", "Close"}.issubset(df.columns):
+        # fallback: approximate ATR from Close
+        return df["Close"].pct_change().abs().rolling(period).mean() * df["Close"]
     high = df["High"]
     low = df["Low"]
     close = df["Close"]
     prev_close = close.shift(1)
-    tr = pd.concat(
-        [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
-    atr = tr.rolling(period).mean()
-    last_close = close.iloc[-1]
-    if last_close == 0 or np.isnan(last_close):
-        return 0.0
-    return float((atr.iloc[-1] / last_close) * 100.0)
+    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
 
-def _trend_score(df: pd.DataFrame) -> Tuple[float, str]:
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def _score_trend(df: pd.DataFrame) -> tuple[float, dict]:
     """
-    Returns (trend_score 0-10, direction: LONG/SHORT/NEUTRAL)
+    Trend score 0..10 using EMA slope + EMA alignment.
     """
-    if df.empty or "Close" not in df.columns or len(df) < 60:
-        return 0.0, "NEUTRAL"
-
-    close = df["Close"].dropna()
+    close = df["Close"]
     if len(close) < 60:
-        return 0.0, "NEUTRAL"
+        return 0.0, {"reason": "insufficient_bars"}
 
-    ema20 = _ema(close, 20)
-    ema50 = _ema(close, 50)
-    ema200 = _ema(close, 200)
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()
 
-    px = close.iloc[-1]
-    up = (ema20.iloc[-1] > ema50.iloc[-1]) and (px > ema200.iloc[-1])
-    down = (ema20.iloc[-1] < ema50.iloc[-1]) and (px < ema200.iloc[-1])
+    # slope of ema50 over last 10 bars (normalized)
+    slope = (ema50.iloc[-1] - ema50.iloc[-11]) / max(1e-9, close.iloc[-1])
+    slope_score = _clamp((slope * 1000) + 5, 0, 10)  # heuristic
 
-    # slope proxy: recent EMA20 change vs price
-    slope = _safe_float((ema20.iloc[-1] - ema20.iloc[-10]) / px * 100.0)
-
-    score = 5.0
-    score += 2.0 if up else 0.0
-    score -= 2.0 if down else 0.0
-    score += np.clip(slope, -2.0, 2.0)
-
-    direction = "LONG" if up else ("SHORT" if down else "NEUTRAL")
-    return float(np.clip(score, 0.0, 10.0)), direction
-
-
-def _vol_score(df: pd.DataFrame) -> float:
-    """
-    Volatility score 0-10 using ATR% buckets
-    """
-    atrp = _atr_pct(df)
-    # simple bucket mapping
-    if atrp <= 0.5:
-        return 2.0
-    if atrp <= 1.0:
-        return 4.0
-    if atrp <= 2.0:
-        return 6.0
-    if atrp <= 3.5:
-        return 8.0
-    return 10.0
-
-
-def _composite_score(trend: float, vol: float) -> float:
-    # weight trend slightly higher than vol
-    return float(np.clip(0.65 * trend + 0.35 * vol, 0.0, 10.0))
-
-
-def _hold_time(lane: str, direction: str, vol_score: float) -> str:
-    if lane == "CRYPTO":
-        return "Exit within 6–24h (tight risk), or 2–3 days if trend persists"
-    if lane == "FOREX":
-        return "Hold 2–7 days (swing), reassess daily"
-    if lane == "OPTIONS":
-        # higher vol -> shorter
-        return "0–5 days (lotto) or 7–21 days (condor), manage risk aggressively"
-    return "TBD"
-
-
-def _lane_recommendation(
-    lane: str,
-    label: str,
-    direction: str,
-    score: float,
-    threshold: float,
-) -> str:
-    if score < threshold or direction == "NEUTRAL":
-        return "No trade — stand down"
-    if lane == "CRYPTO":
-        if direction == "LONG":
-            return f"Go LONG {label} (spot)."
-        return f"Go SHORT {label} only if you have margin/derivatives access."
-    if lane == "FOREX":
-        if direction == "LONG":
-            return f"Go LONG {label}."
-        return f"Go SHORT {label}."
-    if lane == "OPTIONS":
-        # options lane recommendation text is created elsewhere with strikes/expiry
-        return "Options setup available (see below)."
-    return "No trade."
-
-
-def _score_symbol(lane: str, label: str, yf_symbol: str, invert_for_display: bool = False) -> ScoreRow:
-    df = _fetch_daily(yf_symbol)
-    if df.empty:
-        return ScoreRow(
-            symbol=label, trend=0.0, vol=0.0, score=0.0,
-            direction="NEUTRAL", hold=_hold_time(lane, "NEUTRAL", 0.0),
-            rec="No data"
-        )
-
-    # For pairs like JPY=X, CHF=X, yfinance returns USD per JPY/CHF.
-    # If you want "USDJPY" displayed, we still score on the series as-is (direction often flips).
-    trend, direction = _trend_score(df)
-    vol = _vol_score(df)
-    score = _composite_score(trend, vol)
-    hold = _hold_time(lane, direction, vol)
-
-    # If inverted pair, flip direction label so it matches USDJPY intuition
-    if invert_for_display:
-        if direction == "LONG":
-            direction = "SHORT"
-        elif direction == "SHORT":
-            direction = "LONG"
-
-    threshold = CRYPTO_REC_THRESHOLD if lane == "CRYPTO" else (FOREX_REC_THRESHOLD if lane == "FOREX" else OPTIONS_REC_THRESHOLD)
-    rec = _lane_recommendation(lane, label, direction, score, threshold)
-
-    return ScoreRow(
-        symbol=label,
-        trend=float(round(trend, 2)),
-        vol=float(round(vol, 2)),
-        score=float(round(score, 4)),
-        direction=direction,
-        hold=hold,
-        rec=rec,
-    )
-
-
-def run_crypto_scan() -> pd.DataFrame:
-    rows = []
-    for label, yf_symbol in CRYPTO:
-        r = _score_symbol("CRYPTO", label, yf_symbol)
-        rows.append(r.__dict__)
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    return df.sort_values("score", ascending=False).reset_index(drop=True)
-
-
-def run_fx_scan() -> pd.DataFrame:
-    rows = []
-    for label, yf_symbol in FOREX:
-        invert = label in ("USDJPY", "USDCHF")
-        r = _score_symbol("FOREX", label, yf_symbol, invert_for_display=invert)
-        rows.append(r.__dict__)
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    return df.sort_values("score", ascending=False).reset_index(drop=True)
-
-
-# ---------------------------
-# OPTIONS CONTRACT DETAILS
-# ---------------------------
-
-def _pick_near_expiry(expirations: List[str], target_days: int) -> Optional[str]:
-    """
-    Pick expiry closest to target_days in the future.
-    """
-    if not expirations:
-        return None
-    today = datetime.now(timezone.utc).date()
-    best = None
-    best_dist = 10**9
-    for e in expirations:
-        try:
-            d = datetime.strptime(e, "%Y-%m-%d").date()
-            dist = abs((d - today).days - target_days)
-            if (d - today).days >= 1 and dist < best_dist:
-                best = e
-                best_dist = dist
-        except Exception:
-            continue
-    return best or expirations[0]
-
-
-def _mid_price(row: pd.Series) -> float:
-    bid = _safe_float(row.get("bid", np.nan), np.nan)
-    ask = _safe_float(row.get("ask", np.nan), np.nan)
-    last = _safe_float(row.get("lastPrice", np.nan), np.nan)
-    if not np.isnan(bid) and not np.isnan(ask) and ask > 0:
-        return float(round((bid + ask) / 2.0, 2))
-    if not np.isnan(last):
-        return float(round(last, 2))
-    return 0.0
-
-
-def _lotto_contract(tkr: yf.Ticker, underlying: str, direction: str) -> Dict[str, str]:
-    """
-    Lotto: nearest ~5-7 day expiry, ~5% OTM call/put
-    """
-    expirations = list(getattr(tkr, "options", []) or [])
-    exp = _pick_near_expiry(expirations, target_days=5)
-    if not exp:
-        return {"strategy": "LOTTO", "detail": f"{underlying}: options not available"}
-
-    chain = tkr.option_chain(exp)
-    calls = chain.calls.copy()
-    puts = chain.puts.copy()
-
-    px_df = _fetch_daily(underlying)
-    px = float(px_df["Close"].iloc[-1]) if (not px_df.empty and "Close" in px_df.columns) else np.nan
-    if np.isnan(px) or px <= 0:
-        return {"strategy": "LOTTO", "detail": f"{underlying}: price unavailable"}
-
-    target_otm = 1.05 if direction == "LONG" else 0.95
-    target_strike = px * target_otm
-
-    if direction == "LONG":
-        # Call
-        calls["dist"] = (calls["strike"] - target_strike).abs()
-        row = calls.sort_values("dist").iloc[0]
-        strike = float(row["strike"])
-        price = _mid_price(row)
-        return {
-            "strategy": "LOTTO CALL",
-            "underlying": underlying,
-            "expiry": exp,
-            "strike": f"{strike:.2f}",
-            "est_price": f"{price:.2f}",
-            "note": "Target: quick move; cut fast if wrong.",
-        }
+    align = 0.0
+    if ema20.iloc[-1] > ema50.iloc[-1] > ema200.iloc[-1]:
+        align = 10.0
+    elif ema20.iloc[-1] < ema50.iloc[-1] < ema200.iloc[-1]:
+        align = 8.0
     else:
-        # Put
-        puts["dist"] = (puts["strike"] - target_strike).abs()
-        row = puts.sort_values("dist").iloc[0]
-        strike = float(row["strike"])
-        price = _mid_price(row)
-        return {
-            "strategy": "LOTTO PUT",
-            "underlying": underlying,
-            "expiry": exp,
-            "strike": f"{strike:.2f}",
-            "est_price": f"{price:.2f}",
-            "note": "Target: quick move; cut fast if wrong.",
-        }
+        align = 4.0
 
-
-def _iron_condor_contract(tkr: yf.Ticker, underlying: str) -> Dict[str, str]:
-    """
-    Simple iron condor:
-    - expiry ~14 days
-    - short strikes around +/- 1 stdev move (approx), wings further out
-    """
-    expirations = list(getattr(tkr, "options", []) or [])
-    exp = _pick_near_expiry(expirations, target_days=14)
-    if not exp:
-        return {"strategy": "IRON CONDOR", "detail": f"{underlying}: options not available"}
-
-    chain = tkr.option_chain(exp)
-    calls = chain.calls.copy()
-    puts = chain.puts.copy()
-
-    px_df = _fetch_daily(underlying)
-    if px_df.empty or "Close" not in px_df.columns:
-        return {"strategy": "IRON CONDOR", "detail": f"{underlying}: price unavailable"}
-
-    close = px_df["Close"].dropna()
-    px = float(close.iloc[-1])
-
-    # crude stdev estimate from daily returns
-    rets = close.pct_change().dropna()
-    if len(rets) < 30:
-        move = 0.03  # fallback 3%
-    else:
-        move = float(rets.tail(60).std() * np.sqrt(14))  # 14-day stdev
-        move = float(np.clip(move, 0.02, 0.12))  # clamp
-
-    put_short_target = px * (1 - move)
-    call_short_target = px * (1 + move)
-    put_long_target = px * (1 - move * 1.6)
-    call_long_target = px * (1 + move * 1.6)
-
-    # Pick nearest strikes
-    puts["d_short"] = (puts["strike"] - put_short_target).abs()
-    puts["d_long"] = (puts["strike"] - put_long_target).abs()
-    calls["d_short"] = (calls["strike"] - call_short_target).abs()
-    calls["d_long"] = (calls["strike"] - call_long_target).abs()
-
-    p_short = puts.sort_values("d_short").iloc[0]
-    p_long = puts.sort_values("d_long").iloc[0]
-    c_short = calls.sort_values("d_short").iloc[0]
-    c_long = calls.sort_values("d_long").iloc[0]
-
-    # Ensure ordering (long farther OTM)
-    ps = float(p_short["strike"])
-    pl = float(p_long["strike"])
-    cs = float(c_short["strike"])
-    cl = float(c_long["strike"])
-    if pl > ps:
-        pl, ps = ps, pl
-    if cl < cs:
-        cl, cs = cs, cl
-
-    # estimate mid prices
-    credit_est = (_mid_price(p_short) + _mid_price(c_short)) - (_mid_price(p_long) + _mid_price(c_long))
-    credit_est = float(round(max(credit_est, 0.0), 2))
-
-    return {
-        "strategy": "IRON CONDOR",
-        "underlying": underlying,
-        "expiry": exp,
-        "put_long": f"{pl:.2f}",
-        "put_short": f"{ps:.2f}",
-        "call_short": f"{cs:.2f}",
-        "call_long": f"{cl:.2f}",
-        "est_credit": f"{credit_est:.2f}",
-        "note": "Goal: premium capture; manage early if price threatens short strikes.",
+    trend = 0.6 * slope_score + 0.4 * align
+    return float(_clamp(trend, 0, 10)), {
+        "ema20": float(ema20.iloc[-1]),
+        "ema50": float(ema50.iloc[-1]),
+        "ema200": float(ema200.iloc[-1]),
+        "slope": float(slope),
     }
 
 
-def run_options_scan() -> pd.DataFrame:
+def _score_vol(df: pd.DataFrame) -> tuple[float, dict]:
     """
-    Scores underlyings and attaches a suggested options setup for the top candidate (if above threshold).
+    Vol score 0..10 using ATR% (higher ATR% = higher vol score).
     """
-    rows = []
-    for sym in OPTIONS_UNDERLYINGS:
-        r = _score_symbol("OPTIONS", sym, sym)
-        rows.append(r.__dict__)
+    close = df["Close"]
+    if len(close) < 30:
+        return 0.0, {"reason": "insufficient_bars"}
 
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
+    a = _atr(df, 14)
+    atr_last = float(a.iloc[-1]) if not np.isnan(a.iloc[-1]) else 0.0
+    price = float(close.iloc[-1])
 
-    df = df.sort_values("score", ascending=False).reset_index(drop=True)
-
-    # Build one detailed recommendation for the best candidate if strong enough
-    best = df.iloc[0].to_dict()
-    if best.get("score", 0.0) < OPTIONS_REC_THRESHOLD or best.get("direction") == "NEUTRAL":
-        df["options_setup"] = ""
-        return df
-
-    underlying = best["symbol"]
-    direction = best["direction"]
-    tkr = yf.Ticker(underlying)
-
-    # Decide condor vs lotto:
-    # If vol is high and trend is middling => condor. If trend strong => lotto with direction.
-    trend = float(best.get("trend", 0.0))
-    vol = float(best.get("vol", 0.0))
-
-    if vol >= 7.5 and trend <= 6.0:
-        setup = _iron_condor_contract(tkr, underlying)
-    else:
-        setup = _lotto_contract(tkr, underlying, direction="LONG" if direction == "LONG" else "SHORT")
-
-    # Put setup only on the top row so UI stays clean
-    setups = [""] * len(df)
-    setups[0] = setup
-    df["options_setup"] = setups
-
-    # Improve options lane rec text
-    df.loc[0, "rec"] = f"Use {setup.get('strategy', 'OPTIONS')} on {underlying} (details below)."
-
-    return df
+    atrp = (atr_last / price) if price > 0 else 0.0  # ATR %
+    # map 0%..8% to 0..10
+    vol = _clamp((atrp / 0.08) * 10, 0, 10)
+    return float(vol), {"atr": atr_last, "atrp": atrp}
 
 
-def run_full_scan() -> Dict[str, object]:
-    crypto_df = run_crypto_scan()
-    fx_df = run_fx_scan()
-    opt_df = run_options_scan()
+def _regime_label(trend_score: float, vol_score: float) -> str:
+    # simple bucket
+    if trend_score >= 7 and vol_score <= 4:
+        return "Trend + Calm"
+    if trend_score >= 7 and vol_score > 4:
+        return "Trend + Volatile"
+    if trend_score < 7 and vol_score > 6:
+        return "Chop + Volatile"
+    return "Chop / Range"
 
-    # Simple SSI: average of top scores across lanes (bounded)
-    top_scores = []
-    if not crypto_df.empty:
-        top_scores.append(float(crypto_df.iloc[0]["score"]))
-    if not fx_df.empty:
-        top_scores.append(float(fx_df.iloc[0]["score"]))
-    if not opt_df.empty:
-        top_scores.append(float(opt_df.iloc[0]["score"]))
 
-    ssi = float(np.clip(np.mean(top_scores) if top_scores else 0.0, 0.0, 10.0))
+def _lane_reco_crypto(symbol: str, ssi: float) -> str:
+    if ssi < 7:
+        return ""
+    # crypto "lotto-ish" but still actionable
+    return f"Go LONG {symbol.replace('-USD','')} (spot). Target 1–3 days; exit on +3% to +6% move or break of last swing low."
 
-    # Risk banner
-    if ssi < 4.0:
-        banner = "Risk OFF — Stand Down"
-    elif ssi < 6.5:
-        banner = "Neutral — Only A+ setups"
-    else:
-        banner = "Risk ON — Selectively engage"
+
+def _lane_reco_fx(symbol: str, ssi: float, trend_score: float) -> str:
+    if ssi < 7:
+        return ""
+    # Directional bias from trend score
+    direction = "LONG" if trend_score >= 7 else "SHORT"
+    clean = symbol.replace("=X", "")
+    return f"{direction} {clean}. Hold 3–7 days. Exit if price closes against the direction for 2 consecutive days."
+
+
+def _next_weekly_expiry() -> str:
+    # nearest Friday at least 5 calendar days out
+    d = datetime.now().date()
+    # move to next Friday
+    days_ahead = (4 - d.weekday()) % 7
+    if days_ahead < 5:
+        days_ahead += 7
+    exp = d + timedelta(days=days_ahead)
+    return exp.isoformat()
+
+
+def _next_monthly_expiry() -> str:
+    # “~30-45D” approximation: next 3rd Friday of next month
+    d = datetime.now().date()
+    year = d.year + (1 if d.month == 12 else 0)
+    month = 1 if d.month == 12 else d.month + 1
+    first = datetime(year, month, 1).date()
+    # find 3rd Friday
+    fridays = []
+    cur = first
+    while cur.month == month:
+        if cur.weekday() == 4:
+            fridays.append(cur)
+        cur += timedelta(days=1)
+    exp = fridays[2] if len(fridays) >= 3 else fridays[-1]
+    return exp.isoformat()
+
+
+def _options_reco(underlying: str, price: float, trend_score: float, vol_score: float, ssi: float) -> str:
+    """
+    Produces either:
+      - Lotto call/put (nearest weekly)
+      - Iron condor (range/vol)
+    NOTE: This is a heuristic contract suggestion, not option chain pricing.
+    """
+    if ssi < 7:
+        return ""
+
+    # If trending hard -> directional lotto
+    if trend_score >= 7:
+        exp = _next_weekly_expiry()
+        strike = round(price * 1.03, 0)  # ~3% OTM
+        return f"LOTTO: {underlying} CALL {strike:.0f} exp {exp}. Aim 1–5 days. Take profit fast (+50% to +150%)."
+    if trend_score <= 3 and vol_score >= 6:
+        exp = _next_weekly_expiry()
+        strike = round(price * 0.97, 0)  # ~3% OTM
+        return f"LOTTO: {underlying} PUT {strike:.0f} exp {exp}. Aim 1–5 days. Take profit fast (+50% to +150%)."
+
+    # Otherwise: iron condor idea when range-y
+    exp = _next_monthly_expiry()
+    width = max(1.0, price * 0.03)  # ~3% wings
+    short_put = round(price - width, 0)
+    short_call = round(price + width, 0)
+    long_put = round(price - (width * 1.8), 0)
+    long_call = round(price + (width * 1.8), 0)
+    return (
+        f"IRON CONDOR: {underlying} exp {exp} | "
+        f"Sell {short_put:.0f}P / Buy {long_put:.0f}P and Sell {short_call:.0f}C / Buy {long_call:.0f}C. "
+        f"Target 30–45D, manage at 25–50% max profit."
+    )
+
+
+def _score_symbol(label: str, symbol: str) -> dict:
+    df = _fetch_history(symbol, days=240, interval="1d")
+    if df.empty or len(df) < 60:
+        return {
+            "lane": label,
+            "symbol": symbol,
+            "last": np.nan,
+            "trend": 0.0,
+            "vol": 0.0,
+            "ssi": 0.0,
+            "regime": "No Data",
+            "reco": "",
+            "status": "no_data",
+        }
+
+    close = df["Close"]
+    last = float(close.iloc[-1])
+    trend_score, tmeta = _score_trend(df)
+    vol_score, vmeta = _score_vol(df)
+
+    # composite SSI (0..10)
+    # trend weighted slightly higher than vol
+    ssi = _clamp(0.65 * trend_score + 0.35 * vol_score, 0, 10)
+
+    regime = _regime_label(trend_score, vol_score)
+
+    reco = ""
+    if label == "CRYPTO":
+        reco = _lane_reco_crypto(symbol, ssi)
+    elif label == "FOREX":
+        reco = _lane_reco_fx(symbol, ssi, trend_score)
+    elif label == "OPTIONS":
+        reco = _options_reco(symbol, last, trend_score, vol_score, ssi)
 
     return {
-        "asof": _now_utc_str(),
+        "lane": label,
+        "symbol": symbol,
+        "last": round(last, 4),
+        "trend": round(trend_score, 2),
+        "vol": round(vol_score, 2),
         "ssi": round(ssi, 2),
-        "banner": banner,
-        "crypto": crypto_df,
-        "fx": fx_df,
-        "options": opt_df,
+        "regime": regime,
+        "reco": reco,
+        "status": "ok",
+    }
+
+
+def _run_lane(label: str, symbols: list[str]) -> pd.DataFrame:
+    rows = [_score_symbol(label, s) for s in symbols]
+    df = pd.DataFrame(rows)
+
+    # If df is empty (shouldn't), return empty with expected columns
+    if df.empty:
+        return pd.DataFrame(columns=["lane", "symbol", "last", "trend", "vol", "ssi", "regime", "reco", "status"])
+
+    # sort high SSI first
+    return df.sort_values(by="ssi", ascending=False, kind="mergesort").reset_index(drop=True)
+
+
+def run_crypto_scan() -> pd.DataFrame:
+    return _run_lane("CRYPTO", list(universe.CRYPTO))
+
+
+def run_fx_scan() -> pd.DataFrame:
+    return _run_lane("FOREX", list(universe.FOREX))
+
+
+def run_options_scan() -> pd.DataFrame:
+    return _run_lane("OPTIONS", list(universe.OPTIONS_UNDERLYINGS))
+
+
+def run_full_scan() -> dict:
+    crypto = run_crypto_scan()
+    fx = run_fx_scan()
+    opts = run_options_scan()
+
+    # SSI headline: average of best-in-lane SSI (if present)
+    def best_ssi(df: pd.DataFrame) -> float:
+        if df.empty:
+            return 0.0
+        x = df["ssi"].dropna()
+        return float(x.iloc[0]) if len(x) else 0.0
+
+    headline = round((best_ssi(crypto) + best_ssi(fx) + best_ssi(opts)) / 3.0, 2)
+
+    # Risk banner heuristic
+    risk_banner = "Risk OFF — Stand Down" if headline < 5 else ("Selective — Small Size" if headline < 7 else "Risk ON — Favor Trend Setups")
+
+    return {
+        "headline_ssi": headline,
+        "risk_banner": risk_banner,
+        "crypto": crypto,
+        "fx": fx,
+        "options": opts,
     }
