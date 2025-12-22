@@ -163,3 +163,92 @@ def recommend_lane(best_row, ssi, lane):
         f"Confidence: {confidence}. "
         f"Why: {why}."
     )
+    def _round_strike(sym: str, strike: float) -> float:
+    sym = sym.upper()
+    if sym in ["SPY", "QQQ", "IWM"]:
+        step = 1.0
+    else:
+        step = 5.0
+    return round(strike / step) * step
+
+
+def recommend_options_contract(best_row: dict, ssi: float) -> str:
+    """
+    Returns explicit options contract-style guidance:
+    - IRON CONDOR with approximate strikes + expiry window
+    - LOTTO CALL/PUT with approx strike + expiry window
+    - DEFINED-RISK CALL/PUT with approx strike + expiry window
+    Uses only underlying price + our internal metrics (no option chain).
+    """
+    if not best_row:
+        return "OPTIONS: No data available."
+
+    # pull what we already compute
+    sym = best_row.get("symbol")
+    px = float(best_row.get("last", 0))
+    t = int(best_row.get("trend", 0))
+    v = int(best_row.get("vol", 0))
+    score = float(best_row.get("score", 0))
+    tq = best_row.get("trend_quality", "Unknown")
+    rr = best_row.get("range_regime", "Unknown")
+
+    # gate
+    if score < MIN_OPTIONS_SCORE:
+        return "OPTIONS: No trade — no underlying cleared the threshold."
+
+    # risk-off overlay
+    risk_off = ssi <= 3
+
+    # determine directional bias
+    if t >= 7:
+        bias = "CALL"
+        dirn = "LONG"
+    elif t <= 3:
+        bias = "PUT"
+        dirn = "SHORT"
+    else:
+        bias = "NEUTRAL"
+        dirn = "NO TRADE"
+
+    why = f"{tq} + {rr} range + score {score}"
+
+    # 1) Neutral / chop => condor
+    if dirn == "NO TRADE" or (4 <= t <= 6) or rr == "Contracting":
+        # wings based on vol
+        wing = 0.015 if v >= 6 else 0.012      # ~1.2–1.5%
+        hedge = wing + 0.01                    # add ~1% for long wings
+
+        short_put = _round_strike(sym, px * (1 - wing))
+        long_put  = _round_strike(sym, px * (1 - hedge))
+        short_call = _round_strike(sym, px * (1 + wing))
+        long_call  = _round_strike(sym, px * (1 + hedge))
+
+        return (
+            f"OPTIONS: IRON CONDOR {sym} — expiry {CONDOR_DTE}. "
+            f"Sell PUT spread: short ~{short_put}, long ~{long_put}. "
+            f"Sell CALL spread: short ~{short_call}, long ~{long_call}. "
+            f"Why: {why}."
+        )
+
+    # 2) Hot + volatile + directional => lotto (unless risk-off)
+    if (v >= 7) and (not risk_off) and dirn in ("LONG", "SHORT"):
+        otm = 0.02 if v >= 8 else 0.015
+        strike = _round_strike(sym, px * (1 + otm)) if dirn == "LONG" else _round_strike(sym, px * (1 - otm))
+
+        return (
+            f"OPTIONS: LOTTO {bias} {sym} — expiry {LOTTO_DTE}. "
+            f"Target strike ~{strike} (~{int(otm*100)}% OTM). "
+            f"Plan: take profit fast on a spike; cut if momentum dies. "
+            f"Why: {why}."
+        )
+
+    # 3) Otherwise defined-risk directional
+    otm = 0.01
+    strike = _round_strike(sym, px * (1 + otm)) if dirn == "LONG" else _round_strike(sym, px * (1 - otm))
+    side = "CALL" if dirn == "LONG" else "PUT"
+
+    return (
+        f"OPTIONS: DEFINED-RISK {side} {sym} — expiry {DIRECTIONAL_DTE}. "
+        f"Target strike ~{strike} (~1% OTM). Prefer spreads if premiums are expensive. "
+        f"Why: {why}."
+    )
