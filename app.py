@@ -1,51 +1,147 @@
-# app.py
-
 import streamlit as st
-from engine import run_crypto_scan, run_fx_scan, run_options_scan, compute_ssi, recommend_lane, recommend_options_contract
+import pandas as pd
 
-st.set_page_config(page_title="SSI Engine", layout="wide")
+from engine import (
+    run_crypto_scan,
+    run_fx_scan,
+    run_options_scan,
+    compute_ssi,
+    recommend_lane,
+    recommend_options_contract,
+)
+
+# -----------------------------
+# PAGE CONFIG
+# -----------------------------
+st.set_page_config(
+    page_title="SSI Market Decision Engine",
+    layout="wide",
+)
+
+# -----------------------------
+# HEADER
+# -----------------------------
 st.title("SSI Market Decision Engine")
+st.caption("Regime-based crypto, FX, and options decision framework")
 
-st.caption("Opinionated market decision engine. Acts only when conditions justify it.")
+# -----------------------------
+# RUN BUTTON
+# -----------------------------
+run_scan = st.button("Run Full Scan")
 
-if st.button("Run Full Scan"):
-    crypto = run_crypto_scan()
-    fx = run_fx_scan()
-    opts = run_options_scan()
+# -----------------------------
+# MAIN EXECUTION
+# -----------------------------
+if run_scan:
 
-    ssi = compute_ssi(crypto)
-    st.metric("SSI Score", ssi)
+    # ---- Run scans ----
+    crypto_df = run_crypto_scan()
+    fx_df = run_fx_scan()
+    options_df = run_options_scan()
 
-    if ssi >= 7:
-        st.success("REGIME: RISK ON")
-    elif ssi >= 4:
-        st.warning("REGIME: NEUTRAL / CHOP")
-    else:
-        st.error("REGIME: RISK OFF")
+    # ---- Compute overall SSI ----
+    ssi_score = compute_ssi(
+        crypto_df=crypto_df,
+        fx_df=fx_df,
+        options_df=options_df,
+    )
 
-    st.divider()
+    # ---- Top-level recommendation ----
+    regime_message = recommend_lane(
+        ssi_score=ssi_score,
+        crypto_df=crypto_df,
+        fx_df=fx_df,
+        options_df=options_df,
+    )
 
-    best_crypto = crypto[0] if crypto else None
-    best_fx = fx[0] if fx else None
-    best_opt = opts[0] if opts else None
+    # -----------------------------
+    # SUMMARY PANEL
+    # -----------------------------
+    st.subheader("Market Regime Summary")
 
-    st.subheader("Action Output")
-    st.write(recommend_lane(best_crypto, ssi, "CRYPTO"))
-    st.write(recommend_lane(best_fx, ssi, "FOREX"))
-    st.write(recommend_options_contract(best_opt, ssi))
-
-    st.divider()
-
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("Crypto Rankings")
-        st.table(crypto[:5])
+        st.metric("SSI Score", round(ssi_score, 2))
 
     with col2:
-        st.subheader("Forex Rankings")
-        st.table(fx[:5])
+        st.markdown(
+            f"""
+            <div style="padding:12px;border-radius:6px;background-color:#2b2b2b">
+            <strong>{regime_message}</strong>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    with col3:
-        st.subheader("Options Underlyings")
-        st.table(opts[:5])
+    # -----------------------------
+    # CRYPTO LANE
+    # -----------------------------
+    st.subheader("Crypto Lane")
+
+    if crypto_df is not None and not crypto_df.empty:
+        st.dataframe(
+            crypto_df.sort_values("score", ascending=False),
+            use_container_width=True,
+        )
+
+        top_crypto = crypto_df.sort_values("score", ascending=False).iloc[0]
+
+        if top_crypto["score"] >= 7:
+            st.success(
+                f"Go LONG {top_crypto['symbol']} — trend aligned. "
+                f"Target hold: 1–5 days."
+            )
+
+    else:
+        st.warning("Crypto scan returned no data.")
+
+    # -----------------------------
+    # FOREX LANE
+    # -----------------------------
+    st.subheader("Forex Lane")
+
+    if fx_df is not None and not fx_df.empty:
+        st.dataframe(
+            fx_df.sort_values("score", ascending=False),
+            use_container_width=True,
+        )
+
+        top_fx = fx_df.sort_values("score", ascending=False).iloc[0]
+
+        if top_fx["score"] >= 6:
+            direction = "LONG" if top_fx["trend"] > 0 else "SHORT"
+            st.success(
+                f"{direction} {top_fx['symbol']} — swing bias. "
+                f"Target hold: 3–10 days."
+            )
+
+    else:
+        st.warning("FX scan returned no data.")
+
+    # -----------------------------
+    # OPTIONS LANE
+    # -----------------------------
+    st.subheader("Options Lane")
+
+    if options_df is not None and not options_df.empty:
+        st.dataframe(
+            options_df.sort_values("score", ascending=False),
+            use_container_width=True,
+        )
+
+        best_contract = recommend_options_contract(options_df)
+
+        if best_contract is not None:
+            st.success(
+                f"Options Play: {best_contract['strategy']} on "
+                f"{best_contract['symbol']} | "
+                f"Strike: {best_contract['strike']} | "
+                f"Expiry: {best_contract['expiry']} | "
+                f"Bias: {best_contract['bias']}"
+            )
+    else:
+        st.warning("Options scan returned no data.")
+
+else:
+    st.info("Press **Run Full Scan** to evaluate current market conditions.")
