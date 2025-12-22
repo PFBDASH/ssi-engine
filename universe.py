@@ -1,24 +1,22 @@
 # universe.py
 
-CRYPTO_SYMBOLS = [
-    "BTCUSD",
-    "ETHUSD",
-    "SOLUSD",
-    "XRPUSD",
-    "ADAUSD",
+CRYPTO = [
+    ("BTCUSD", "BTC-USD"),
+    ("ETHUSD", "ETH-USD"),
+    ("SOLUSD", "SOL-USD"),
+    ("XRPUSD", "XRP-USD"),
+    ("ADAUSD", "ADA-USD"),
 ]
 
-# Stooq FX daily symbols (no suffix)
-FOREX_SYMBOLS = [
-    "EURUSD",
-    "GBPUSD",
-    "USDJPY",
-    "AUDUSD",
-    "USDCAD",
+FOREX = [
+    ("EURUSD", "EURUSD=X"),
+    ("GBPUSD", "GBPUSD=X"),
+    ("USDJPY", "JPY=X"),      # USDJPY via JPY=X (USD per JPY). We'll invert internally for display.
+    ("AUDUSD", "AUDUSD=X"),
+    ("USDCHF", "CHF=X"),      # USDCHF via CHF=X (USD per CHF). We'll invert internally for display.
 ]
 
-# Underlyings to score for “Options Lane”
-# (we’re scoring the underlying, not pulling option chains)
+# Options underlyings (liquid, US)
 OPTIONS_UNDERLYINGS = [
     "SPY",
     "QQQ",
