@@ -1,68 +1,98 @@
-# app.py
-import streamlit as st
-from engine import run_crypto_scan, run_fx_scan, run_options_scan, compute_ssi, options_playbook
+# engine.py
 
-st.set_page_config(page_title="SSI Engine", layout="wide")
-st.title("SSI Market Decision Engine")
+from indicators import trend_score, vol_score
+from data_sources import (
+    fetch_crypto_ohlc,
+    fetch_fx_daily,
+    fetch_equity_daily,
+)
+from universe import (
+    CRYPTO_SYMBOLS,
+    FOREX_SYMBOLS,
+    OPTIONS_UNDERLYINGS,
+)
 
-run = st.button("Run Full Scan")
+# ---------------- CORE SCAN ----------------
 
-if run:
-    crypto = run_crypto_scan()
-    fx = run_fx_scan()
-    opts = run_options_scan()
+def _scan(symbols, fetch_fn):
+    rows = []
+    for sym in symbols:
+        try:
+            df = fetch_fn(sym)
+            t = trend_score(df)
+            v = vol_score(df)
+            score = round(0.7 * t + 0.3 * v, 1)
+            last = float(df["close"].iloc[-1])
 
-    ssi = compute_ssi(crypto, fx, opts)
-    st.metric("SSI Score", ssi)
+            rows.append({
+                "symbol": sym,
+                "last": round(last, 6),
+                "trend": int(t),
+                "vol": int(v),
+                "score": score,
+            })
+        except Exception:
+            continue
 
+    return sorted(rows, key=lambda x: x["score"], reverse=True)
+
+
+def run_crypto_scan():
+    return _scan(CRYPTO_SYMBOLS, lambda s: fetch_crypto_ohlc(s, interval=60))
+
+
+def run_fx_scan():
+    return _scan(FOREX_SYMBOLS, fetch_fx_daily)
+
+
+def run_options_scan():
+    return _scan(OPTIONS_UNDERLYINGS, fetch_equity_daily)
+
+
+def compute_ssi(crypto_rows):
+    if not crypto_rows:
+        return 0.0
+    top = crypto_rows[:5]
+    return round(sum(r["score"] for r in top) / len(top), 1)
+
+# ---------------- PLAYBOOKS ----------------
+
+def _bias(trend):
+    if trend >= 7:
+        return "BULLISH"
+    if trend <= 3:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def crypto_playbook(row, ssi, min_score):
+    if row["score"] < min_score:
+        return "CRYPTO: NO TRADE — score below threshold"
+
+    if ssi <= 3:
+        return "CRYPTO: RISK OFF — stand down"
+    if ssi >= 7 and row["trend"] >= 7:
+        return "CRYPTO: MOMENTUM / LOTTO (small size)"
+    return "CRYPTO: CONTROLLED DIRECTIONAL"
+
+
+def forex_playbook(row, ssi, min_score):
+    if row["score"] < min_score:
+        return "FOREX: NO TRADE — score below threshold"
+
+    if ssi <= 3:
+        return "FOREX: SMALL / STAND DOWN"
     if ssi >= 7:
-        st.success("RISK ON — Favor momentum. Directional ideas only if liquidity is good.")
-    elif ssi >= 4:
-        st.warning("NEUTRAL / CHOP — Selective setups. Smaller size. Prefer mean reversion.")
-    else:
-        st.error("RISK OFF — Stand down. Preserve capital.")
+        return "FOREX: TREND FOLLOW (swing)"
+    return "FOREX: RANGE / MEAN REVERSION"
 
-    st.divider()
 
-    col1, col2, col3 = st.columns(3)
+def options_playbook(row, ssi, min_score):
+    if row["score"] < min_score:
+        return "OPTIONS: NO TRADE — score below threshold"
 
-    with col1:
-        st.subheader("Crypto Lane")
-        st.caption("Kraken OHLC (hourly).")
-        st.table(crypto[:5])
-
-    with col2:
-        st.subheader("Forex Lane")
-        st.caption("FREE daily OHLC via Stooq.")
-        st.table(fx[:5])
-
-    with col3:
-        st.subheader("Options Lane")
-        st.caption("FREE daily OHLC via Stooq (scores underlyings, not option chains).")
-        st.table(opts[:5])
-
-        st.subheader("Options Playbook (top underlying)")
-        if opts:
-            top = opts[0]
-            pb = options_playbook(top, ssi)
-
-            if pb["structure"] == "STAND DOWN":
-                st.error(pb["rationale"])
-            elif "LOTTO" in pb["structure"]:
-                st.success(pb["rationale"])
-            else:
-                st.warning(pb["rationale"])
-
-            st.write(f"**Underlying:** {pb['underlying']}  |  **Last:** {pb['last']}")
-            st.write(f"**Bias:** {pb['bias']}")
-            st.write(f"**Structure:** {pb['structure']}")
-
-            if pb["expiry_days"] is not None:
-                st.write(f"**Expiry heuristic:** {pb['expiry_days']} DTE")
-            if pb["target_strike"] is not None:
-                st.write(f"**Target strike zone (approx):** {pb['target_strike']}")
-        else:
-            st.info("No options-underlying data returned (source may be down).")
-
-else:
-    st.caption("Tap **Run Full Scan** to pull live data and compute SSI.")
+    if ssi <= 3:
+        return "OPTIONS: STAND DOWN"
+    if ssi >= 7 and row["trend"] >= 7:
+        return "OPTIONS: LOTTO (0–1 DTE, tiny risk)"
+    return "OPTIONS: DEFINED RISK (spreads / 3–7 DTE)"
