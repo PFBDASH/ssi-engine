@@ -1,22 +1,26 @@
 # universe.py
 
+# Keep symbols simple + compatible with yfinance.
+# Crypto uses the "-USD" format.
+# FX uses "=X" format.
+# Options lane uses US equity/ETF underlyings.
+
 CRYPTO = [
-    ("BTCUSD", "BTC-USD"),
-    ("ETHUSD", "ETH-USD"),
-    ("SOLUSD", "SOL-USD"),
-    ("XRPUSD", "XRP-USD"),
-    ("ADAUSD", "ADA-USD"),
+    "BTC-USD",
+    "ETH-USD",
+    "SOL-USD",
+    "XRP-USD",
+    "ADA-USD",
 ]
 
 FOREX = [
-    ("EURUSD", "EURUSD=X"),
-    ("GBPUSD", "GBPUSD=X"),
-    ("USDJPY", "JPY=X"),      # USDJPY via JPY=X (USD per JPY). We'll invert internally for display.
-    ("AUDUSD", "AUDUSD=X"),
-    ("USDCHF", "CHF=X"),      # USDCHF via CHF=X (USD per CHF). We'll invert internally for display.
+    "EURUSD=X",
+    "GBPUSD=X",
+    "USDJPY=X",
+    "AUDUSD=X",
+    "USDCHF=X",
 ]
 
-# Options underlyings (liquid, US)
 OPTIONS_UNDERLYINGS = [
     "SPY",
     "QQQ",
