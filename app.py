@@ -1,67 +1,43 @@
 # app.py
 import streamlit as st
-import pandas as pd
-
 import engine
 
 st.set_page_config(page_title="SSI Market Decision Engine", layout="wide")
 
 st.title("SSI Market Decision Engine")
-st.caption("Regime-based crypto, FX, and options decision framework")
+st.caption("Crypto + FX + Options decision engine")
 
-run_scan = st.button("Run Full Scan")
-
-if run_scan:
+if st.button("Run Full Scan"):
     crypto_df = engine.run_crypto_scan()
     fx_df = engine.run_fx_scan()
     options_df = engine.run_options_scan()
 
-    ssi_score = engine.compute_ssi(
-        crypto_df=crypto_df,
-        fx_df=fx_df,
-        options_df=options_df,
-    )
+    ssi_score = engine.compute_ssi(crypto_df, fx_df, options_df)
+    headline = engine.recommend_lane(ssi_score, crypto_df, fx_df, options_df)
 
-    regime_message = engine.recommend_lane(
-        ssi_score=ssi_score,
-        crypto_df=crypto_df,
-        fx_df=fx_df,
-        options_df=options_df,
-    )
-
-    st.subheader("Market Regime Summary")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("SSI Score", round(ssi_score, 2))
-    with col2:
-        st.markdown(
-            f"<div style='padding:12px;border-radius:6px;background:#2b2b2b'><strong>{regime_message}</strong></div>",
-            unsafe_allow_html=True,
-        )
+    st.subheader("Market Regime")
+    st.metric("SSI Score", round(float(ssi_score), 2))
+    st.success(headline)
 
     st.subheader("Crypto Lane")
-    if crypto_df is not None and not crypto_df.empty:
-        st.dataframe(crypto_df.sort_values('score', ascending=False), use_container_width=True)
-        top = crypto_df.sort_values("score", ascending=False).iloc[0]
-        if top["score"] >= 7:
-            st.success(f"Go LONG {top['symbol']} — target 1–5 day hold")
+    st.dataframe(crypto_df, use_container_width=True)
+    rec = engine.recommend_crypto(crypto_df)
+    if rec:
+        st.info(rec)
 
     st.subheader("Forex Lane")
-    if fx_df is not None and not fx_df.empty:
-        st.dataframe(fx_df.sort_values('score', ascending=False), use_container_width=True)
-        top = fx_df.sort_values("score", ascending=False).iloc[0]
-        direction = "LONG" if top["trend"] > 0 else "SHORT"
-        if top["score"] >= 6:
-            st.success(f"{direction} {top['symbol']} — swing hold 3–10 days")
+    st.dataframe(fx_df, use_container_width=True)
+    rec = engine.recommend_fx(fx_df)
+    if rec:
+        st.info(rec)
 
     st.subheader("Options Lane")
-    if options_df is not None and not options_df.empty:
-        st.dataframe(options_df.sort_values('score', ascending=False), use_container_width=True)
-        rec = engine.recommend_options_contract(options_df)
-        if rec:
-            st.success(
-                f"{rec['strategy']} | {rec['symbol']} | "
-                f"Strike {rec['strike']} | Exp {rec['expiry']} | Bias {rec['bias']}"
-            )
+    st.dataframe(options_df, use_container_width=True)
+    orec = engine.recommend_options_contract(options_df)
+    if orec:
+        st.warning(
+            f"{orec['strategy']} | {orec['symbol']} | Bias: {orec['bias']} | "
+            f"Exp: {orec['expiry']} | Strike: {orec['strike']} | Est premium: {orec.get('est_premium','N/A')}"
+        )
 else:
-    st.info("Press **Run Full Scan** to evaluate the market.")
+    st.info("Tap **Run Full Scan**.")
