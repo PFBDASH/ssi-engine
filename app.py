@@ -1,14 +1,7 @@
 # app.py
 
 import streamlit as st
-from engine import (
-    run_crypto_scan,
-    run_fx_scan,
-    run_options_scan,
-    compute_ssi,
-    recommend_lane,
-    recommend_options_contract
-)
+from engine import run_crypto_scan, run_fx_scan, run_options_scan, compute_ssi, recommend_lane, recommend_options_contract
 
 st.set_page_config(page_title="SSI Engine", layout="wide")
 st.title("SSI Market Decision Engine")
