@@ -1,6 +1,6 @@
 # app.py
 import streamlit as st
-from engine import run_crypto_scan, run_fx_scan, run_options_scan, compute_ssi
+from engine import run_crypto_scan, run_fx_scan, run_options_scan, compute_ssi, options_playbook
 
 st.set_page_config(page_title="SSI Engine", layout="wide")
 st.title("SSI Market Decision Engine")
@@ -41,14 +41,28 @@ if run:
         st.caption("FREE daily OHLC via Stooq (scores underlyings, not option chains).")
         st.table(opts[:5])
 
-        # Simple playbook cue (structure suggestion, not strike/expiry)
-        top = opts[0]["symbol"] if opts else None
-        if top:
-            if ssi >= 7:
-                st.success(f"Playbook cue: Momentum environment. If trading options, start by watching **{top}** for trend-follow setups.")
-            elif ssi >= 4:
-                st.warning(f"Playbook cue: Chop. If trading options, consider range/defined-risk structures on **{top}** (not lottos).")
+        st.subheader("Options Playbook (top underlying)")
+        if opts:
+            top = opts[0]
+            pb = options_playbook(top, ssi)
+
+            if pb["structure"] == "STAND DOWN":
+                st.error(pb["rationale"])
+            elif "LOTTO" in pb["structure"]:
+                st.success(pb["rationale"])
             else:
-                st.error("Playbook cue: Risk-off. Options lottos are lowest-quality here.")
+                st.warning(pb["rationale"])
+
+            st.write(f"**Underlying:** {pb['underlying']}  |  **Last:** {pb['last']}")
+            st.write(f"**Bias:** {pb['bias']}")
+            st.write(f"**Structure:** {pb['structure']}")
+
+            if pb["expiry_days"] is not None:
+                st.write(f"**Expiry heuristic:** {pb['expiry_days']} DTE")
+            if pb["target_strike"] is not None:
+                st.write(f"**Target strike zone (approx):** {pb['target_strike']}")
+        else:
+            st.info("No options-underlying data returned (source may be down).")
+
 else:
     st.caption("Tap **Run Full Scan** to pull live data and compute SSI.")
