@@ -6,18 +6,15 @@ from engine import (
     run_fx_scan,
     run_options_scan,
     compute_ssi,
-    crypto_playbook,
-    forex_playbook,
-    options_playbook,
+    recommend_crypto,
+    recommend_fx,
+    recommend_options,
 )
 
 st.set_page_config(page_title="SSI Engine", layout="wide")
 st.title("SSI Market Decision Engine")
 
-with st.expander("Recommendation Gates", expanded=True):
-    min_crypto = st.slider("Min Crypto Score", 0.0, 10.0, 6.5, 0.1)
-    min_fx = st.slider("Min FX Score", 0.0, 10.0, 6.0, 0.1)
-    min_opt = st.slider("Min Options Score", 0.0, 10.0, 6.5, 0.1)
+st.caption("One-click scan. Outputs a clear action when conditions justify it. Thresholds run in the background.")
 
 if st.button("Run Full Scan"):
     crypto = run_crypto_scan()
@@ -28,30 +25,40 @@ if st.button("Run Full Scan"):
     st.metric("SSI Score", ssi)
 
     if ssi >= 7:
-        st.success("RISK ON")
+        st.success("REGIME: RISK ON")
     elif ssi >= 4:
-        st.warning("NEUTRAL / CHOP")
+        st.warning("REGIME: NEUTRAL / CHOP")
     else:
-        st.error("RISK OFF")
+        st.error("REGIME: RISK OFF")
+
+    st.divider()
+
+    # Best rows for each lane
+    best_crypto = crypto[0] if crypto else None
+    best_fx = fx[0] if fx else None
+    best_opt = opts[0] if opts else None
+
+    # Action Box (what you actually want)
+    st.subheader("Action Output")
+    st.write("**Crypto:** " + recommend_crypto(best_crypto, ssi))
+    st.write("**Forex:** " + recommend_fx(best_fx, ssi))
+    st.write("**Options:** " + recommend_options(best_opt, ssi))
 
     st.divider()
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.subheader("Crypto Lane")
+        st.subheader("Crypto Rankings (Top 5)")
         if crypto:
-            st.info(crypto_playbook(crypto[0], ssi, min_crypto))
             st.table(crypto[:5])
 
     with col2:
-        st.subheader("Forex Lane")
+        st.subheader("Forex Rankings (Top 5)")
         if fx:
-            st.info(forex_playbook(fx[0], ssi, min_fx))
             st.table(fx[:5])
 
     with col3:
-        st.subheader("Options Lane")
+        st.subheader("Options Underlyings (Top 5)")
         if opts:
-            st.info(options_playbook(opts[0], ssi, min_opt))
             st.table(opts[:5])
