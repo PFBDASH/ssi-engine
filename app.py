@@ -39,7 +39,7 @@ if st.button("Run Full Scan"):
     st.subheader("Action Output")
     st.write(recommend_lane(best_crypto, ssi, "CRYPTO"))
     st.write(recommend_lane(best_fx, ssi, "FOREX"))
-    st.write(recommend_lane(best_opt, ssi, "OPTIONS"))
+    st.write(recommend_options_contract(best_opt, ssi))
 
     st.divider()
 
