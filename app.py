@@ -305,7 +305,20 @@ def market_state(lane: str, now_et=None):
         return False, "Closed — Reopens next session"
 
     return False, "Closed"
+def lane_status(lane: str, df: pd.DataFrame) -> str:
+    is_open, label = market_state(lane)
 
+    if df is None or df.empty:
+        return "Closed — No Data"
+
+    top = df.iloc[0]
+    if top.get("status") != "ok":
+        return "Closed — No Data"
+
+    if not is_open:
+        return label
+
+    return "Active" if float(top.get("ssi", 0)) >= 7 else "Stand Down"
 
 def show_lane(title: str, df: pd.DataFrame):
     st.subheader(title)
