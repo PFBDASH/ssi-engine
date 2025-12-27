@@ -480,30 +480,28 @@ needs_setup = needs_lane_setup()
 
 # Allow changing later (Starter/Pro)
 if tier in ("Starter", "Pro"):
-    with st.expander("⚙️ Manage lanes", expanded=needs_setup):
+    with st.expander("⚙️ Manage lanes", expanded=False):
         st.subheader("Configure Your Market Engine")
-st.caption("Choose which intelligence engines to attach to your account.")
+        st.caption("Choose which intelligence engines to unlock")
 
         pick = st.multiselect(
             label=f"Select up to {max_lanes}",
             options=LANES_ALL,
-            default=selected_lanes[:max_lanes] if selected_lanes else [],
+            default=selected_lanes[:max_lanes]
         )
 
         if len(pick) > max_lanes:
-            st.warning(f"Too many selected. Your tier allows {max_lanes}.")
+            st.warning("Too many selected.")
         else:
             if st.button("Save lane selection"):
                 if member_id:
-                    ok = update_member_custom_fields(member_id, {CUSTOM_FIELD_KEY: pick})
+                    ok = update_member_custom_fields(member_id, {"lanes": pick})
                     if ok:
                         selected_lanes = pick
                         st.success("Saved. Refreshing…")
                         st.rerun()
-                    else:
-                        st.error("Could not save selection. Try again.")
                 else:
-                    st.error("Missing member_id in token payload; cannot persist selection.")
+                    st.error("Missing member id.")
 
 # Safety: if downgraded and still has too many saved, trim
 if tier in ("Starter", "Pro") and len(selected_lanes) > max_lanes and member_id:
