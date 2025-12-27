@@ -326,6 +326,7 @@ banner = res.get("risk_banner", "Unknown")
 c1, c2 = st.columns([1, 3])
 with c1:
     st.metric("SSI Score", ssi)
+    st.caption("This score updates in real time. Only active regimes produce trade opportunities.")
 with c2:
     st.markdown(f"### {banner}")
 
@@ -343,8 +344,18 @@ status_df = pd.DataFrame(
     ]
 )
 
-st.subheader("Lane Status")
-st.dataframe(status_df, use_container_width=True, hide_index=True)
+st.subheader("Lane Activity")
+
+for _, row in status_df.iterrows():
+    lane = row["Lane"]
+    status = row["Status"]
+
+    if status == "Active":
+        st.success(f"{lane} Lane is ACTIVE")
+    elif status == "Stand Down":
+        st.warning(f"{lane} Lane is currently in stand-down mode")
+    else:
+        st.info(f"{lane} Lane status unknown")
 
 st.divider()
 
@@ -526,7 +537,9 @@ for i, lane in enumerate(selected_lanes):
             show_lane("Options Lane", opt_df)
 
 st.divider()
-
+st.divider()
+st.markdown("### Daily Regime Reminder")
+st.caption("The SSI regime can flip overnight. Check in daily to stay on the correct side of risk.")
 # Footer controls
 cols = st.columns([1, 1, 2])
 with cols[0]:
