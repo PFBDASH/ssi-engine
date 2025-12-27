@@ -537,7 +537,6 @@ for i, lane in enumerate(selected_lanes):
             show_lane("Options Lane", opt_df)
 
 st.divider()
-st.divider()
 st.markdown("### Daily Regime Reminder")
 st.caption("The SSI regime can flip overnight. Check in daily to stay on the correct side of risk.")
 # Footer controls
