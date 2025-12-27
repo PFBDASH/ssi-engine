@@ -24,6 +24,9 @@ MEMBERSTACK_API_KEY = os.getenv("MEMBERSTACK_API_KEY", "").strip()
 # Webflow base URL (example: https://your-site.webflow.io or your custom domain)
 WEBFLOW_BASE_URL = os.getenv("WEBFLOW_BASE_URL", "").strip()
 
+# Admin access list (comma-separated emails)
+ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "").strip()
+
 # Your Memberstack price IDs (you provided these)
 PRICE_STARTER = "prc_ssi-starter-x54n0gfn"
 PRICE_PRO = "prc_ssi-pro-y54p0hul"
@@ -73,7 +76,19 @@ def build_webflow_url(path: str) -> Optional[str]:
 
 
 LOGIN_URL = build_webflow_url("/login")
-SIGNUP_URL = build_webflow_url("/plans")  # <-- your clarified signup path
+SIGNUP_URL = build_webflow_url("/plans")  # signup/pricing path
+
+
+def is_admin_email(email: Optional[str]) -> bool:
+    """
+    Admin allowlist via env var ADMIN_EMAILS="a@b.com,c@d.com"
+    """
+    if not email:
+        return False
+    if not ADMIN_EMAILS:
+        return False
+    admin_set = {e.strip().lower() for e in ADMIN_EMAILS.split(",") if e.strip()}
+    return email.strip().lower() in admin_set
 
 
 def get_ms_token() -> Optional[str]:
@@ -88,7 +103,6 @@ def get_ms_token() -> Optional[str]:
             return token[0] if token else None
         return token
     except Exception:
-        # older fallback
         params = st.experimental_get_query_params()
         return params.get("ms", [None])[0]
 
@@ -112,9 +126,7 @@ def verify_memberstack_token(token: str) -> Optional[Dict[str, Any]]:
         r = requests.post(url, headers=headers, json=body, timeout=15)
         if r.status_code != 200:
             return None
-        data = r.json()
-        # Some responses wrap in { "member": {...} } or { "data": {...} }
-        return data
+        return r.json()
     except Exception:
         return None
 
@@ -124,11 +136,8 @@ def extract_price_ids(payload: Dict[str, Any]) -> List[str]:
     Best-effort extraction of Memberstack price IDs from verifyToken payload.
     """
     text = json.dumps(payload)
-
-    # common keys sometimes present
     candidates: List[str] = []
 
-    # Try structured paths first
     for key in ["priceIds", "price_ids", "prices", "planConnections", "plans", "subscriptions"]:
         if key in payload and isinstance(payload[key], list):
             for item in payload[key]:
@@ -139,10 +148,8 @@ def extract_price_ids(payload: Dict[str, Any]) -> List[str]:
                         if isinstance(v, str) and v.startswith("prc_"):
                             candidates.append(v)
 
-    # Regex fallback
     candidates += re.findall(r"prc_[a-zA-Z0-9\-_]+", text)
 
-    # unique preserve order
     out = []
     seen = set()
     for c in candidates:
@@ -176,23 +183,17 @@ def allowed_lane_count(tier: str) -> int:
 
 
 def get_member_id(payload: Dict[str, Any]) -> Optional[str]:
-    """
-    Extract a member id from verifyToken payload.
-    """
-    # common spots
     for key in ["id", "memberId", "member_id"]:
         v = payload.get(key)
         if isinstance(v, str) and v.strip():
             return v.strip()
 
-    # nested member
     m = payload.get("member")
     if isinstance(m, dict):
         v = m.get("id") or m.get("memberId")
         if isinstance(v, str) and v.strip():
             return v.strip()
 
-    # regex fallback
     text = json.dumps(payload)
     m2 = re.search(r'"memberId"\s*:\s*"([^"]+)"', text)
     return m2.group(1) if m2 else None
@@ -210,7 +211,6 @@ def get_member_email(payload: Dict[str, Any]) -> Optional[str]:
         if isinstance(v, str) and v.strip():
             return v.strip()
 
-    # regex fallback
     text = json.dumps(payload)
     m2 = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text)
     return m2.group(0) if m2 else None
@@ -218,7 +218,7 @@ def get_member_email(payload: Dict[str, Any]) -> Optional[str]:
 
 def get_selected_lanes_from_payload(payload: Dict[str, Any]) -> List[str]:
     """
-    Reads customFields.selectedLanes if present.
+    Reads member.customFields.selectedLanes if present.
     Accepts list or comma-separated string.
     """
     member = payload.get("member")
@@ -237,7 +237,6 @@ def get_selected_lanes_from_payload(payload: Dict[str, Any]) -> List[str]:
     else:
         lanes = []
 
-    # filter to known lanes and keep order
     out = []
     for ln in lanes:
         if ln in LANES_ALL and ln not in out:
@@ -264,9 +263,6 @@ def update_member_custom_fields(member_id: str, custom_fields: Dict[str, Any]) -
 
 
 def is_weekend_ny() -> bool:
-    """
-    US market weekend check (New York time).
-    """
     now = datetime.now(ZoneInfo("America/New_York"))
     return now.weekday() >= 5  # 5=Sat, 6=Sun
 
@@ -301,10 +297,7 @@ def show_lane(title: str, df: Optional[pd.DataFrame]):
         st.success(reco)
 
     cols = [c for c in ["symbol", "last", "trend", "vol", "ssi", "regime"] if c in df.columns]
-    if cols:
-        st.dataframe(df[cols], use_container_width=True, hide_index=True)
-    else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df[cols] if cols else df, use_container_width=True, hide_index=True)
 
 
 # =========================
@@ -406,6 +399,13 @@ max_lanes = allowed_lane_count(tier)
 member_id = get_member_id(member_payload)
 member_email = get_member_email(member_payload)
 
+# =========================
+# ADMIN OVERRIDE (EMAIL ALLOWLIST)
+# =========================
+if is_admin_email(member_email):
+    tier = "Black"
+    max_lanes = 3
+
 # Logged-in summary
 left, right = st.columns([3, 2])
 with left:
@@ -417,7 +417,7 @@ with right:
         unsafe_allow_html=True,
     )
 
-# If paid tier but zero lanes allowed (shouldn't happen)
+# If paid tier but zero lanes allowed
 if max_lanes == 0:
     st.warning("You are logged in, but you don't have an active plan that unlocks dashboards.")
     if SIGNUP_URL:
@@ -427,12 +427,18 @@ if max_lanes == 0:
 # Read saved lanes
 selected_lanes = get_selected_lanes_from_payload(member_payload)
 
-# Black tier: auto-force all lanes + persist once
+# Admin: always all lanes (do not rely on Memberstack write)
+if is_admin_email(member_email):
+    selected_lanes = LANES_ALL[:]
+
+# Black tier: auto-force all lanes + (optional) persist once
 if tier == "Black":
     if set(selected_lanes) != set(LANES_ALL) and member_id:
         ok = update_member_custom_fields(member_id, {CUSTOMFIELD_SELECTED_LANES: LANES_ALL})
         if ok:
             selected_lanes = LANES_ALL[:]
+    else:
+        selected_lanes = LANES_ALL[:]
 else:
     # Starter/Pro: enforce max_lanes if previously saved too many
     if len(selected_lanes) > max_lanes and member_id:
@@ -476,7 +482,7 @@ if tier in ("Starter", "Pro"):
         st.warning("Choose your lane(s) above to unlock dashboards.")
         st.stop()
 
-# After selection, if still empty (should not happen), stop
+# After selection, if still empty, stop
 if not selected_lanes:
     st.warning("Choose your lane(s) to unlock dashboards.")
     st.stop()
@@ -497,7 +503,6 @@ for i, lane in enumerate(selected_lanes):
         elif lane == "Forex":
             show_lane("Forex Lane", fx_df)
         elif lane == "Options":
-            # weekend note
             if is_weekend_ny():
                 st.info("Options markets are closed on weekends. Signals may reflect last session.")
             show_lane("Options Lane", opt_df)
