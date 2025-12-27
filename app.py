@@ -470,8 +470,8 @@ needs_setup = needs_lane_setup()
 # Allow changing later (Starter/Pro)
 if tier in ("Starter", "Pro"):
     with st.expander("⚙️ Manage lanes", expanded=needs_setup):
-        st.subheader("Activate Your Market Lanes")
-        st.caption("Each lane is a standalone engine you attach to your account. You can change this later.")
+        st.subheader("Configure Your Market Engine")
+st.caption("Choose which intelligence engines to attach to your account.")
 
         pick = st.multiselect(
             label=f"Select up to {max_lanes}",
