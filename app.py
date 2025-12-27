@@ -9,6 +9,7 @@ import pandas as pd
 import requests
 
 import engine
+from datetime import datetime, timezone
 
 # =================================================
 # CONFIG
@@ -202,7 +203,7 @@ token = get_ms_token()
 # =================================================
 # RUN ENGINE ONCE PER SESSION (so logged-out users still see SSI)
 # =================================================
-run = st.button("Run Full Scan")
+run = st.button("Refresh")
 
 if "result" not in st.session_state:
     st.session_state["result"] = None
@@ -210,7 +211,7 @@ if "result" not in st.session_state:
 if run or st.session_state["result"] is None:
     with st.spinner("Running market scan…"):
         st.session_state["result"] = engine.run_full_scan()
-
+st.session_state["last_updated_utc"] = datetime.now(timezone.utc).isoformat()
 res = st.session_state["result"]
 if not res:
     st.error("Scan failed. Try again.")
@@ -317,7 +318,38 @@ with right:
         f'<div class="card"><b>Tier:</b> {tier}<br><span class="smallmuted">Lane limit: {allowed_lane_count(tier)}</span></div>',
         unsafe_allow_html=True
     )
+## ==============================
+# USER CONTROLS
+# ==============================
+st.divider()
+c1, c2, c3 = st.columns([1, 1, 2])
 
+with c1:
+    refresh = st.button("🔄 Refresh Scan", use_container_width=True)
+
+with c2:
+    change = st.button("⚙ Change Lanes", use_container_width=True)
+
+if refresh:
+    with st.spinner("Refreshing scan…"):
+        st.session_state["result"] = engine.run_full_scan()
+    st.rerun()
+
+if change:
+    if not member_id:
+        st.error("Could not identify your member profile.")
+        st.stop()
+
+    # wipe saved lane selections in Memberstack custom fields
+    wipe = {LANE_TO_FIELD[l]: False for l in LANES_ALL}
+    ok = update_member_custom_fields(member_id, wipe)
+
+    if not ok:
+        st.error("Could not reset lane preferences.")
+        st.stop()
+
+    st.success("Lane preferences reset — choose new lanes below.")
+    st.rerun()
 # =================================================
 # LANE ACCESS RULES
 # Starter: choose 1
