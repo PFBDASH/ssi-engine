@@ -372,20 +372,31 @@ if token and MEMBERSTACK_API_KEY:
 
 # If no token, we stop after overview and show login/signup CTAs
 if not token:
-    st.subheader("Unlock dashboards")
-    st.info("🔒 Log in to unlock your selected dashboards. New? Choose a plan on /plans.")
+    st.markdown("## The SSI Market Engine")
+    st.caption("A regime-aware trading engine that tells you when to stand down — and where to focus when risk is active.")
 
-    colA, colB = st.columns(2)
+    st.markdown("### Available Market Lanes")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("#### 🪙 Crypto Lane")
+        st.write("Detects active crypto regimes and identifies the highest-probability market structures.")
+    with c2:
+        st.markdown("#### 💱 Forex Lane")
+        st.write("Tracks macro + volatility cycles and highlights directional FX opportunity.")
+    with c3:
+        st.markdown("#### 📈 Options Lane")
+        st.write("Identifies high-asymmetry option structures during elevated volatility regimes.")
+
+    st.divider()
+
+    colA, colB = st.columns([2,1])
     with colA:
-        if login_url:
-            st.link_button("Log in", login_url)
-        else:
-            st.warning("Set WEBFLOW_BASE_URL in Render env vars.")
-    with colB:
         if signup_url:
-            st.link_button("Choose a plan", signup_url)
-        else:
-            st.warning("Set WEBFLOW_BASE_URL in Render env vars.")
+            st.link_button("Start your engine", signup_url, use_container_width=True)
+    with colB:
+        if login_url:
+            st.link_button("Log in", login_url, use_container_width=True)
 
     st.stop()
 
