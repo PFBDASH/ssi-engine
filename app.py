@@ -3,6 +3,8 @@ import os
 import json
 import re
 from typing import Any, Dict, List, Optional
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 import pandas as pd
@@ -11,73 +13,92 @@ import streamlit as st
 import engine
 
 
-# =================================================
+# =========================
 # CONFIG
-# =================================================
+# =========================
 st.set_page_config(page_title="SSI Market Decision Engine", layout="wide")
 
-# ---- Env vars (set these in Render) ----
-MEMBERSTACK_API_KEY = os.getenv("MEMBERSTACK_API_KEY", "").strip()  # REQUIRED for tier unlocks
-WEBFLOW_BASE_URL = os.getenv("WEBFLOW_BASE_URL", "").strip()        # e.g. https://YOUR-SITE.webflow.io or your custom domain
+# Memberstack / Webflow config (ENV VARS)
+MEMBERSTACK_API_KEY = os.getenv("MEMBERSTACK_API_KEY", "").strip()
 
-# Your Memberstack "price" IDs (you gave these)
+# Webflow base URL (example: https://your-site.webflow.io or your custom domain)
+WEBFLOW_BASE_URL = os.getenv("WEBFLOW_BASE_URL", "").strip()
+
+# Your Memberstack price IDs (you provided these)
 PRICE_STARTER = "prc_ssi-starter-x54n0gfn"
-PRICE_PRO     = "prc_ssi-pro-y54p0hul"
-PRICE_BLACK   = "prc_ssi-black-d34q0h3p"
-
-# Webflow paths (you specified signup path should be /plans)
-LOGIN_PATH  = "/login"
-SIGNUP_PATH = "/plans"   # <-- this is your "plans" page
+PRICE_PRO = "prc_ssi-pro-y54p0hul"
+PRICE_BLACK = "prc_ssi-black-d34q0h3p"
 
 # Lanes
 LANES_ALL = ["Crypto", "Forex", "Options"]
-CUSTOM_FIELD_KEY = "selected_lanes"   # stored in Memberstack member.customFields.selected_lanes
+
+# Custom field key in Memberstack where we store lane selection
+CUSTOMFIELD_SELECTED_LANES = "selectedLanes"
 
 
-# =================================================
-# UI polish
-# =================================================
+# =========================
+# SMALL UI STYLE
+# =========================
 st.markdown(
     """
-<style>
-/* Slightly nicer spacing on mobile + cards */
-.block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
-.card {
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
-  padding: 12px 14px;
-  border-radius: 12px;
-}
-.smallmuted { color: rgba(255,255,255,0.65); font-size: 0.9rem; }
-</style>
-""",
+    <style>
+      .smallmuted { color: rgba(255,255,255,0.65); font-size: 0.9rem; }
+      .card {
+        padding: 0.8rem 1rem;
+        border-radius: 14px;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: rgba(255,255,255,0.03);
+      }
+      .pill {
+        display: inline-block;
+        padding: 0.15rem 0.6rem;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.14);
+        background: rgba(255,255,255,0.06);
+        font-size: 0.85rem;
+      }
+    </style>
+    """,
     unsafe_allow_html=True,
 )
 
 
-# =================================================
+# =========================
 # HELPERS
-# =================================================
+# =========================
+def build_webflow_url(path: str) -> Optional[str]:
+    if not WEBFLOW_BASE_URL:
+        return None
+    return WEBFLOW_BASE_URL.rstrip("/") + path
+
+
+LOGIN_URL = build_webflow_url("/login")
+SIGNUP_URL = build_webflow_url("/plans")  # <-- your clarified signup path
+
+
 def get_ms_token() -> Optional[str]:
     """
-    Memberstack passes a token like: ?ms=xxxxx
-    Works with Streamlit >= 1.30 st.query_params
+    Read ms token from query params: ?ms=<token>
+    Supports Streamlit >= 1.30 (st.query_params) and older fallback.
     """
-    params = st.query_params
-    token = params.get("ms")
-    if isinstance(token, list):
-        return token[0] if token else None
-    return token
+    try:
+        qp = st.query_params
+        token = qp.get("ms")
+        if isinstance(token, list):
+            return token[0] if token else None
+        return token
+    except Exception:
+        # older fallback
+        params = st.experimental_get_query_params()
+        return params.get("ms", [None])[0]
 
 
 def verify_memberstack_token(token: str) -> Optional[Dict[str, Any]]:
     """
-    Verifies token server-side via Memberstack Admin API
-    POST https://admin.memberstack.com/members/verifyToken
-    headers: X-API-KEY: <secret>
-    body: { "token": "<jwt>" }
+    Verifies token with Memberstack Admin API.
+    Uses header X-API-KEY: <secret>
     """
-    if not MEMBERSTACK_API_KEY:
+    if not token or not MEMBERSTACK_API_KEY:
         return None
 
     url = "https://admin.memberstack.com/members/verifyToken"
@@ -91,51 +112,50 @@ def verify_memberstack_token(token: str) -> Optional[Dict[str, Any]]:
         r = requests.post(url, headers=headers, json=body, timeout=15)
         if r.status_code != 200:
             return None
-        return r.json()
+        data = r.json()
+        # Some responses wrap in { "member": {...} } or { "data": {...} }
+        return data
     except Exception:
         return None
 
 
 def extract_price_ids(payload: Dict[str, Any]) -> List[str]:
     """
-    Best-effort extraction of plan/price IDs from the verifyToken payload.
-    Memberstack payload shape can vary by setup, so we scan the JSON blob too.
+    Best-effort extraction of Memberstack price IDs from verifyToken payload.
     """
-    if not payload:
-        return []
+    text = json.dumps(payload)
 
-    # 1) Try common structured places
+    # common keys sometimes present
     candidates: List[str] = []
 
-    def walk(obj: Any):
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if k in ("priceId", "price_id", "planId", "plan_id", "id") and isinstance(v, str):
-                    candidates.append(v)
-                walk(v)
-        elif isinstance(obj, list):
-            for x in obj:
-                walk(x)
+    # Try structured paths first
+    for key in ["priceIds", "price_ids", "prices", "planConnections", "plans", "subscriptions"]:
+        if key in payload and isinstance(payload[key], list):
+            for item in payload[key]:
+                if isinstance(item, str) and item.startswith("prc_"):
+                    candidates.append(item)
+                elif isinstance(item, dict):
+                    for v in item.values():
+                        if isinstance(v, str) and v.startswith("prc_"):
+                            candidates.append(v)
 
-    walk(payload)
+    # Regex fallback
+    candidates += re.findall(r"prc_[a-zA-Z0-9\-_]+", text)
 
-    # 2) Also scan raw json text for prc_... ids
-    blob = json.dumps(payload)
-    found = re.findall(r"prc_[a-zA-Z0-9\-_]+", blob)
-    candidates.extend(found)
-
-    # de-dupe preserve order
+    # unique preserve order
     out = []
     seen = set()
     for c in candidates:
-        if c and c not in seen:
-            seen.add(c)
+        if c not in seen:
             out.append(c)
+            seen.add(c)
     return out
 
 
 def resolve_tier(price_ids: List[str]) -> str:
-    """Returns: Free | Starter | Pro | Black"""
+    """
+    Returns: Free | Starter | Pro | Black
+    """
     if PRICE_BLACK in price_ids:
         return "Black"
     if PRICE_PRO in price_ids:
@@ -157,103 +177,77 @@ def allowed_lane_count(tier: str) -> int:
 
 def get_member_id(payload: Dict[str, Any]) -> Optional[str]:
     """
-    Find member id in common fields or nested member object.
+    Extract a member id from verifyToken payload.
     """
-    if not payload:
-        return None
-
+    # common spots
     for key in ["id", "memberId", "member_id"]:
-        val = payload.get(key)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
+        v = payload.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
 
+    # nested member
     m = payload.get("member")
     if isinstance(m, dict):
-        mid = m.get("id")
-        if isinstance(mid, str) and mid.strip():
-            return mid.strip()
+        v = m.get("id") or m.get("memberId")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
 
-    # fallback: scan blob for something that looks like a member id
-    blob = json.dumps(payload)
-    # Memberstack member ids often start with "mem_" but not guaranteed; keep conservative
-    m2 = re.search(r"(mem_[a-zA-Z0-9]+)", blob)
+    # regex fallback
+    text = json.dumps(payload)
+    m2 = re.search(r'"memberId"\s*:\s*"([^"]+)"', text)
     return m2.group(1) if m2 else None
 
 
 def get_member_email(payload: Dict[str, Any]) -> Optional[str]:
-    if not payload:
-        return None
     for key in ["email", "memberEmail", "member_email"]:
-        val = payload.get(key)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
+        v = payload.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+
     m = payload.get("member")
     if isinstance(m, dict):
-        em = m.get("email")
-        if isinstance(em, str) and em.strip():
-            return em.strip()
+        v = m.get("email")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
 
-    blob = json.dumps(payload)
-    m2 = re.search(r"[\w\.\-]+@[\w\.\-]+\.\w+", blob)
+    # regex fallback
+    text = json.dumps(payload)
+    m2 = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text)
     return m2.group(0) if m2 else None
 
 
 def get_selected_lanes_from_payload(payload: Dict[str, Any]) -> List[str]:
     """
-    Reads member.customFields.selected_lanes if present.
-    Accepts:
-      - list ["Crypto","Forex"]
-      - comma string "Crypto,Forex"
-      - json string '["Crypto","Forex"]'
+    Reads customFields.selectedLanes if present.
+    Accepts list or comma-separated string.
     """
-    if not payload:
+    member = payload.get("member")
+    if not isinstance(member, dict):
         return []
 
-    member = payload.get("member") if isinstance(payload.get("member"), dict) else {}
-    custom = member.get("customFields") if isinstance(member.get("customFields"), dict) else {}
-
-    raw = custom.get(CUSTOM_FIELD_KEY)
-
-    if raw is None:
-        # also allow top-level customFields fallback
-        raw2 = payload.get("customFields")
-        if isinstance(raw2, dict):
-            raw = raw2.get(CUSTOM_FIELD_KEY)
-
-    if raw is None:
+    custom = member.get("customFields")
+    if not isinstance(custom, dict):
         return []
 
-    if isinstance(raw, list):
-        lanes = [x for x in raw if isinstance(x, str)]
-    elif isinstance(raw, str):
-        s = raw.strip()
-        if s.startswith("["):
-            try:
-                arr = json.loads(s)
-                lanes = [x for x in arr if isinstance(x, str)]
-            except Exception:
-                lanes = []
-        else:
-            lanes = [x.strip() for x in s.split(",") if x.strip()]
+    v = custom.get(CUSTOMFIELD_SELECTED_LANES)
+    if isinstance(v, list):
+        lanes = [x for x in v if isinstance(x, str)]
+    elif isinstance(v, str):
+        lanes = [x.strip() for x in v.split(",") if x.strip()]
     else:
         lanes = []
 
-    # sanitize to known lanes
-    lanes = [l for l in lanes if l in LANES_ALL]
-    # de-dupe preserve order
-    out, seen = [], set()
-    for l in lanes:
-        if l not in seen:
-            seen.add(l)
-            out.append(l)
+    # filter to known lanes and keep order
+    out = []
+    for ln in lanes:
+        if ln in LANES_ALL and ln not in out:
+            out.append(ln)
     return out
 
 
 def update_member_custom_fields(member_id: str, custom_fields: Dict[str, Any]) -> bool:
     """
-    PATCH https://admin.memberstack.com/members/{memberId}
-    headers: X-API-KEY
-    body: { "customFields": {...} }
+    PATCH member custom fields in Memberstack
     """
     if not MEMBERSTACK_API_KEY or not member_id:
         return False
@@ -269,86 +263,57 @@ def update_member_custom_fields(member_id: str, custom_fields: Dict[str, Any]) -
         return False
 
 
-from datetime import datetime, time
-import pytz
+def is_weekend_ny() -> bool:
+    """
+    US market weekend check (New York time).
+    """
+    now = datetime.now(ZoneInfo("America/New_York"))
+    return now.weekday() >= 5  # 5=Sat, 6=Sun
 
-ET = pytz.timezone("US/Eastern")
 
-def market_state(lane: str, now_et=None):
-    now = now_et or datetime.now(ET)
-    wd = now.weekday()  # Mon=0 .. Sun=6
-    t = now.time()
-    lane = lane.lower()
-
-    # Crypto always open
-    if lane == "crypto":
-        return True, "Open"
-
-    # Forex: Sun 5pm → Fri 5pm ET
-    if lane == "forex":
-        if wd == 5:
-            return False, "Closed — Weekend"
-        if wd == 6:
-            return (t >= time(17,0)), "Open" if t >= time(17,0) else "Closed — Opens Sun 5pm ET"
-        if wd == 4:
-            return (t < time(17,0)), "Open" if t < time(17,0) else "Closed — Reopens Sun 5pm ET"
-        return True, "Open"
-
-    # Options: Mon–Fri 9:30am–4:00pm ET
-    if lane == "options":
-        if wd >= 5:
-            return False, "Closed — Weekend"
-        if time(9,30) <= t < time(16,0):
-            return True, "Open"
-        if t < time(9,30):
-            return False, "Closed — Opens 9:30am ET"
-        return False, "Closed — Reopens next session"
-
-    return False, "Closed"
-def lane_status(lane: str, df: pd.DataFrame) -> str:
-    is_open, label = market_state(lane)
+def lane_status_from_df(df: Optional[pd.DataFrame], lane_name: str) -> str:
+    """
+    Computes "Active" / "Stand Down" / "No Data" plus Options-weekend override.
+    """
+    if lane_name == "Options" and is_weekend_ny():
+        return "Closed (Weekend)"
 
     if df is None or df.empty:
-        return "Closed — No Data"
-
+        return "No Data"
     top = df.iloc[0]
-    if top.get("status") != "ok":
-        return "Closed — No Data"
+    if str(top.get("status", "")).lower() != "ok":
+        return "No Data"
+    try:
+        ssi_val = float(top.get("ssi", 0))
+    except Exception:
+        ssi_val = 0.0
+    return "Active" if ssi_val >= 7 else "Stand Down"
 
-    if not is_open:
-        return label
 
-    return "Active" if float(top.get("ssi", 0)) >= 7 else "Stand Down"
-
-def show_lane(title: str, df: pd.DataFrame):
+def show_lane(title: str, df: Optional[pd.DataFrame]):
     st.subheader(title)
-
     if df is None or df.empty:
         st.warning("No data available.")
         return
 
-    # recommendation highlight if present
     reco = str(df.iloc[0].get("reco", "") or "").strip()
     if reco:
         st.success(reco)
 
     cols = [c for c in ["symbol", "last", "trend", "vol", "ssi", "regime"] if c in df.columns]
-    st.dataframe(df[cols], use_container_width=True, hide_index=True)
+    if cols:
+        st.dataframe(df[cols], use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-def build_webflow_url(path: str) -> Optional[str]:
-    if not WEBFLOW_BASE_URL:
-        return None
-    return WEBFLOW_BASE_URL.rstrip("/") + path
-
-
-# =================================================
-# RUN ENGINE (EVERYONE CAN SEE OVERVIEW)
-# =================================================
+# =========================
+# RUN SCAN (PUBLIC)
+# =========================
 st.title("SSI Market Decision Engine")
 st.caption("Crypto + FX + Options → regime-aware trade guidance")
 
-run = st.button("Run Full Scan")
+run = st.button("Run Full Scan", use_container_width=False)
 
 if "result" not in st.session_state:
     st.session_state["result"] = None
@@ -362,252 +327,169 @@ if not res:
     st.error("Scan failed. Try again.")
     st.stop()
 
-ssi = res.get("headline_ssi", 0.0)
-banner = res.get("risk_banner", "Unknown")
-
-c1, c2 = st.columns([1, 3])
-with c1:
-    st.metric("SSI Score", ssi)
-    st.caption("This score updates in real time. Only active regimes produce trade opportunities.")
-with c2:
-    st.markdown(f"### {banner}")
-
-st.divider()
+headline_ssi = float(res.get("headline_ssi", 0.0) or 0.0)
+banner = str(res.get("risk_banner", "Unknown") or "Unknown")
 
 crypto_df = res.get("crypto")
 fx_df = res.get("fx")
 opt_df = res.get("options")
 
+# =========================
+# PUBLIC OVERVIEW (NO LOGIN REQUIRED)
+# =========================
+c1, c2 = st.columns([1, 3])
+with c1:
+    st.metric("SSI Score", f"{headline_ssi:.2f}")
+with c2:
+    st.markdown(f"### {banner}")
+
+st.caption("This score updates in real time. Only active regimes produce trade opportunities.")
+st.divider()
+
+st.markdown("## Lane Activity")
+st.caption("High-level status only. Log in to unlock dashboards.")
+
 status_df = pd.DataFrame(
     [
-        {"Lane": "Crypto", "Status": lane_status(crypto_df)},
-        {"Lane": "Forex", "Status": lane_status(fx_df)},
-        {"Lane": "Options", "Status": lane_status(opt_df)},
+        {"Lane": "Crypto", "Status": lane_status_from_df(crypto_df, "Crypto")},
+        {"Lane": "Forex", "Status": lane_status_from_df(fx_df, "Forex")},
+        {"Lane": "Options", "Status": lane_status_from_df(opt_df, "Options")},
     ]
 )
-
-st.subheader("Lane Activity")
-
-for _, row in status_df.iterrows():
-    lane = row["Lane"]
-    status = row["Status"]
-
-    if status == "Active":
-        st.success(f"{lane} Lane is ACTIVE")
-    elif status == "Stand Down":
-        st.warning(f"{lane} Lane is currently in stand-down mode")
-    else:
-        st.info(f"{lane} Lane status unknown")
+st.dataframe(status_df, use_container_width=True, hide_index=True)
 
 st.divider()
 
-
-# =================================================
-# AUTH + TIER RESOLUTION
-# =================================================
+# =========================
+# AUTH GATE (DASHBOARDS)
+# =========================
 token = get_ms_token()
-login_url = build_webflow_url(LOGIN_PATH)
-signup_url = build_webflow_url(SIGNUP_PATH)
 
-member_payload = None
-tier = "Free"
-member_id = None
-member_email = None
-price_ids: List[str] = []
-
-if token and MEMBERSTACK_API_KEY:
-    member_payload = verify_memberstack_token(token)
-    if member_payload:
-        price_ids = extract_price_ids(member_payload)
-        tier = resolve_tier(price_ids)
-        member_id = get_member_id(member_payload)
-        member_email = get_member_email(member_payload)
-
-# If no token, we stop after overview and show login/signup CTAs
+# Not logged in: show CTA and stop AFTER overview
 if not token:
-    st.markdown("## The SSI Market Engine")
-    st.caption("A regime-aware trading engine that tells you when to stand down — and where to focus when risk is active.")
+    st.markdown("## Unlock dashboards")
+    st.info("Log in if you already have an account. New? Choose a plan on /plans.")
 
-    st.markdown("### Available Market Lanes")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown("#### 🪙 Crypto Lane")
-        st.write("Detects active crypto regimes and identifies the highest-probability market structures.")
-    with c2:
-        st.markdown("#### 💱 Forex Lane")
-        st.write("Tracks macro + volatility cycles and highlights directional FX opportunity.")
-    with c3:
-        st.markdown("#### 📈 Options Lane")
-        st.write("Identifies high-asymmetry option structures during elevated volatility regimes.")
-
-    st.divider()
-
-    colA, colB = st.columns([2,1])
+    colA, colB = st.columns(2)
     with colA:
-        if signup_url:
-            st.link_button("Start your engine", signup_url, use_container_width=True)
+        if LOGIN_URL:
+            st.link_button("Log in", LOGIN_URL, use_container_width=True)
+        else:
+            st.button("Log in (set WEBFLOW_BASE_URL)", disabled=True, use_container_width=True)
     with colB:
-        if login_url:
-            st.link_button("Log in", login_url, use_container_width=True)
+        if SIGNUP_URL:
+            st.link_button("Choose a plan", SIGNUP_URL, use_container_width=True)
+        else:
+            st.button("Choose a plan (set WEBFLOW_BASE_URL)", disabled=True, use_container_width=True)
 
+    if not WEBFLOW_BASE_URL:
+        st.warning("Set WEBFLOW_BASE_URL in Render env vars to enable login/plan buttons.")
     st.stop()
 
-# Token exists but server key missing
+# If token exists but server key missing -> hard stop (secure)
 if token and not MEMBERSTACK_API_KEY:
-    st.error("Server is missing MEMBERSTACK_API_KEY (Render env var). Cannot verify access.")
+    st.error("Server is missing MEMBERSTACK_API_KEY. Add it in Render environment variables.")
     st.stop()
 
-# Token exists but invalid
-if token and not member_payload:
-    st.error("Your login token couldn't be verified.")
-    if login_url:
-        st.link_button("Log in", login_url)
+member_payload = verify_memberstack_token(token)
+
+if not member_payload:
+    st.error("Your login token could not be verified. Please log in again.")
+    if LOGIN_URL:
+        st.link_button("Log in", LOGIN_URL)
     st.stop()
 
+price_ids = extract_price_ids(member_payload)
+tier = resolve_tier(price_ids)
+max_lanes = allowed_lane_count(tier)
 
-# =================================================
-# LOGGED-IN SUMMARY
-# =================================================
+member_id = get_member_id(member_payload)
+member_email = get_member_email(member_payload)
+
+# Logged-in summary
 left, right = st.columns([3, 2])
 with left:
-    st.success(f"✅ Logged in{f' as {member_email}' if member_email else ''}")
+    st.success(f"✅ Logged in{' as ' + member_email if member_email else ''}")
 with right:
     st.markdown(
-        f'<div class="card"><b>Tier:</b> {tier}<br><span class="smallmuted">Access determined from your active plan</span></div>',
-        unsafe_allow_html=True
+        f'<div class="card"><b>Tier:</b> <span class="pill">{tier}</span><br>'
+        f'<span class="smallmuted">Lanes allowed:</span> <b>{max_lanes}</b></div>',
+        unsafe_allow_html=True,
     )
 
-st.divider()
-
-
-# =================================================
-# LANE ACCESS + SELECTION
-# Rules:
-# - Starter: choose 1
-# - Pro: choose up to 2
-# - Black: all 3 auto
-# - Free: none
-# =================================================
-# ============================
-# MARKET HOURS GOVERNOR
-# ============================
-from datetime import datetime, time
-import pytz
-
-ET = pytz.timezone("US/Eastern")
-
-def market_state(lane: str, now_et: datetime | None = None):
-    if now_et is None:
-        now_et = datetime.now(ET)
-
-    lane = lane.lower().strip()
-    wd = now_et.weekday()  # Mon=0 .. Sun=6
-    t = now_et.time()
-
-    # Crypto is always open
-    if lane == "crypto":
-        return True, "Open"
-
-    # Forex: Sun 5pm → Fri 5pm ET
-    if lane == "forex":
-        if wd == 5:
-            return False, "Closed — Weekend"
-        if wd == 6:
-            return (t >= time(17, 0)), "Open" if t >= time(17, 0) else "Closed — Opens Sun 5pm ET"
-        if wd == 4:
-            return (t < time(17, 0)), "Open" if t < time(17, 0) else "Closed — Reopens Sun 5pm ET"
-        return True, "Open"
-
-    # Options: Mon–Fri 9:30am–4:00pm ET
-    if lane == "options":
-        if wd >= 5:
-            return False, "Closed — Weekend"
-        if time(9, 30) <= t < time(16, 0):
-            return True, "Open"
-        if t < time(9, 30):
-            return False, "Closed — Opens 9:30am ET"
-        return False, "Closed — Reopens next session"
-
-    return False, "Closed"
-max_lanes = allowed_lane_count(tier)
-selected_lanes = get_selected_lanes_from_payload(member_payload) if member_payload else []
-
-# Free tier: no lanes, show plan CTA
+# If paid tier but zero lanes allowed (shouldn't happen)
 if max_lanes == 0:
-    st.info("You’re logged in, but you don’t have an active paid plan.")
-    if signup_url:
-        st.link_button("Choose a plan", signup_url)
+    st.warning("You are logged in, but you don't have an active plan that unlocks dashboards.")
+    if SIGNUP_URL:
+        st.link_button("Choose a plan", SIGNUP_URL)
     st.stop()
 
-# Black: auto-select all 3 (write once if needed)
-if tier == "Black" and member_id:
-    if set(selected_lanes) != set(LANES_ALL):
-        ok = update_member_custom_fields(member_id, {CUSTOM_FIELD_KEY: LANES_ALL})
+# Read saved lanes
+selected_lanes = get_selected_lanes_from_payload(member_payload)
+
+# Black tier: auto-force all lanes + persist once
+if tier == "Black":
+    if set(selected_lanes) != set(LANES_ALL) and member_id:
+        ok = update_member_custom_fields(member_id, {CUSTOMFIELD_SELECTED_LANES: LANES_ALL})
         if ok:
             selected_lanes = LANES_ALL[:]
-        else:
-            # still allow access locally even if write fails
-            selected_lanes = LANES_ALL[:]
+else:
+    # Starter/Pro: enforce max_lanes if previously saved too many
+    if len(selected_lanes) > max_lanes and member_id:
+        trimmed = selected_lanes[:max_lanes]
+        ok = update_member_custom_fields(member_id, {CUSTOMFIELD_SELECTED_LANES: trimmed})
+        if ok:
+            selected_lanes = trimmed
 
-# Starter/Pro selection logic (persisted)
-def needs_lane_setup() -> bool:
-    if tier in ("Starter", "Pro"):
-        if len(selected_lanes) == 0:
-            return True
-        if len(selected_lanes) > max_lanes:
-            return True
-    return False
+# If no lanes selected yet (Starter/Pro), force selection
+needs_selection = (tier in ("Starter", "Pro")) and (len(selected_lanes) == 0)
 
-needs_setup = needs_lane_setup()
-
-# Allow changing later (Starter/Pro)
+# =========================
+# LANE SELECTION + CHANGE (Starter/Pro)
+# =========================
 if tier in ("Starter", "Pro"):
-    with st.expander("⚙️ Manage lanes", expanded=False):
+    with st.expander("⚙️ Manage lanes", expanded=needs_selection):
         st.subheader("Configure Your Market Engine")
-        st.caption("Choose which intelligence engines to unlock")
+        st.caption("Pick which dashboards you want to unlock. You can change this anytime.")
 
         pick = st.multiselect(
             label=f"Select up to {max_lanes}",
             options=LANES_ALL,
-            default=selected_lanes[:max_lanes]
+            default=selected_lanes[:max_lanes],
         )
 
         if len(pick) > max_lanes:
-            st.warning("Too many selected.")
+            st.warning(f"Too many selected. Your tier allows {max_lanes}.")
         else:
-            if st.button("Save lane selection"):
-                if member_id:
-                    ok = update_member_custom_fields(member_id, {"lanes": pick})
+            if st.button("Save lane selection", use_container_width=True):
+                if not member_id:
+                    st.error("Missing member_id; cannot save selection.")
+                else:
+                    ok = update_member_custom_fields(member_id, {CUSTOMFIELD_SELECTED_LANES: pick})
                     if ok:
-                        selected_lanes = pick
                         st.success("Saved. Refreshing…")
                         st.rerun()
-                else:
-                    st.error("Missing member id.")
+                    else:
+                        st.error("Could not save selection. Try again.")
 
-# Safety: if downgraded and still has too many saved, trim
-if tier in ("Starter", "Pro") and len(selected_lanes) > max_lanes and member_id:
-    trimmed = selected_lanes[:max_lanes]
-    ok = update_member_custom_fields(member_id, {CUSTOM_FIELD_KEY: trimmed})
-    if ok:
-        selected_lanes = trimmed
+    if needs_selection:
+        st.warning("Choose your lane(s) above to unlock dashboards.")
+        st.stop()
 
-
-# If still no lanes (shouldn't happen for paid), stop
+# After selection, if still empty (should not happen), stop
 if not selected_lanes:
     st.warning("Choose your lane(s) to unlock dashboards.")
     st.stop()
 
-
-# =================================================
+# =========================
 # DASHBOARDS — ONLY FOR SELECTED LANES
-# =================================================
+# =========================
 st.markdown("## Your Market Engine")
-st.caption(f"Access Tier: {tier}   |   Active Lanes: {', '.join(selected_lanes)}")
+st.caption(f"Access Tier: {tier}  |  Active Lanes: {', '.join(selected_lanes)}")
 st.divider()
 
 tabs = st.tabs(selected_lanes)
+
 for i, lane in enumerate(selected_lanes):
     with tabs[i]:
         if lane == "Crypto":
@@ -615,21 +497,23 @@ for i, lane in enumerate(selected_lanes):
         elif lane == "Forex":
             show_lane("Forex Lane", fx_df)
         elif lane == "Options":
+            # weekend note
+            if is_weekend_ny():
+                st.info("Options markets are closed on weekends. Signals may reflect last session.")
             show_lane("Options Lane", opt_df)
 
 st.divider()
+
 st.markdown("### Daily Regime Reminder")
-st.caption("The SSI regime can flip overnight. Check in daily to stay on the correct side of risk.")
+st.caption("SSI can flip overnight. Re-check before placing size.")
+
 # Footer controls
-cols = st.columns([1, 1, 2])
-with cols[0]:
-    if signup_url:
-        st.link_button("Manage plan / Pricing", signup_url)
-with cols[1]:
-    if login_url:
-        st.link_button("Account / Login", login_url)
-with cols[2]:
-    st.markdown(
-        '<span class="smallmuted">Tip: Bookmark this page after login. Your token in the URL is what unlocks access.</span>',
-        unsafe_allow_html=True
-    )
+col1, col2, col3 = st.columns([1, 1, 2])
+with col1:
+    if SIGNUP_URL:
+        st.link_button("Manage plan / Pricing", SIGNUP_URL, use_container_width=True)
+with col2:
+    if LOGIN_URL:
+        st.link_button("Account / Login", LOGIN_URL, use_container_width=True)
+with col3:
+    st.markdown('<span class="smallmuted">Tip: bookmark this page after login.</span>', unsafe_allow_html=True)
