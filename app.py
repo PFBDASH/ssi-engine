@@ -446,7 +446,8 @@ if tier in ("Starter", "Pro") and len(selected_lanes) > max_lanes and member_id:
     if ok:
         st.session_state["selected_lanes"] = trimmed
         selected_lanes = trimmed
-
+st.markdown("## Your Market Engine")
+st.caption(f"Tier: {tier} | Active Lanes: {', '.join(selected_lanes)}")
 # =================================================
 # DASHBOARDS — ONLY FOR SELECTED LANES
 # =================================================
