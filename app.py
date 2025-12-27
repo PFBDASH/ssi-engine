@@ -25,7 +25,7 @@ PRICE_BLACK = "prc_ssi-black-d34q0h3p"
 # Optional: where to send people to login/signup (your Webflow site)
 WEBFLOW_BASE = os.getenv("WEBFLOW_BASE_URL", "https://ssi-auth.webflow.io")
 LOGIN_URL = f"{WEBFLOW_BASE}/login"
-SIGNUP_URL = f"{WEBFLOW_BASE}/signup"
+SIGNUP_URL = f"{WEBFLOW_BASE}/plans"
 
 
 # -----------------------------
