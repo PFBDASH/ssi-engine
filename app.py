@@ -350,63 +350,102 @@ if change:
 
     st.success("Lane preferences reset — choose new lanes below.")
     st.rerun()
-# =================================================
-# LANE ACCESS RULES
-# Starter: choose 1
-# Pro: choose up to 2
+# ============================
+# LANE ACCESS RULES + SELECTION
+# Starter: choose 1 lane
+# Pro: choose up to 2 lanes
 # Black: all 3 auto
 # Free: none
-# =================================================
+# ============================
+
+LANES_ALL = ["Crypto", "Forex", "Options"]
 max_lanes = allowed_lane_count(tier)
 
+# Read saved lanes (from member payload custom fields if you already extracted it)
+# If you already have `selected_lanes` earlier, this will keep it.
+if "selected_lanes" not in st.session_state:
+    st.session_state["selected_lanes"] = []
+
+selected_lanes = st.session_state["selected_lanes"]
+
+# If you already parsed a saved lanes list from member_payload, put it into session_state once.
+# (If you already do this elsewhere, you can delete this block.)
+if member_payload and not selected_lanes:
+    # Try common locations for custom fields
+    cf = None
+    if isinstance(member_payload, dict):
+        cf = member_payload.get("customFields") or member_payload.get("custom_fields")
+        if not cf and isinstance(member_payload.get("member"), dict):
+            cf = member_payload["member"].get("customFields") or member_payload["member"].get("custom_fields")
+
+    if isinstance(cf, dict):
+        raw = cf.get("lanes")
+        if isinstance(raw, list):
+            selected_lanes = [x for x in raw if x in LANES_ALL]
+            st.session_state["selected_lanes"] = selected_lanes
+
+# Free tier: stop after overview
 if max_lanes == 0:
-    st.info("You are logged in, but you don’t have an active plan with lane access.")
+    st.info("You are logged in, but you don’t have any dashboards unlocked.")
     if SIGNUP_URL:
         st.link_button("Choose a plan", SIGNUP_URL)
     st.stop()
 
-# Black auto-select all lanes and write once
+# Black tier: force all lanes (write once)
 if tier == "Black" and member_id:
     if set(selected_lanes) != set(LANES_ALL):
-        ok = update_member_custom_fields(member_id, {LANE_TO_FIELD[l]: True for l in LANES_ALL})
+        ok = update_member_custom_fields(member_id, {"lanes": LANES_ALL})
         if ok:
             selected_lanes = LANES_ALL[:]
+            st.session_state["selected_lanes"] = selected_lanes
 
-# If no lanes yet OR user has too many lanes (downgrade), force setup
-needs_setup = (len(selected_lanes) == 0) or (len(selected_lanes) > max_lanes)
+# Starter/Pro: allow user to change lanes any time
+if tier in ("Starter", "Pro") and member_id:
+    with st.expander("Manage lanes", expanded=False):
+        st.caption(f"You can select up to **{max_lanes}** lane(s) on your plan.")
 
-if needs_setup:
-    st.subheader("Choose your lanes")
-    st.caption("One-time setup. You can change later (we can add a settings page).")
+        # Prefill picker with current selection
+        pick = st.multiselect(
+            "Your lanes",
+            options=LANES_ALL,
+            default=selected_lanes,
+            max_selections=max_lanes,
+        )
 
-    pick = st.multiselect(
-        f"Select up to {max_lanes} lane(s):",
-        options=LANES_ALL,
-        default=[],
-        max_selections=max_lanes,
-    )
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("Save lanes"):
+                # Enforce limit (Streamlit should enforce via max_selections, but keep it safe)
+                pick = [x for x in pick if x in LANES_ALL][:max_lanes]
+                ok = update_member_custom_fields(member_id, {"lanes": pick})
+                if ok:
+                    st.session_state["selected_lanes"] = pick
+                    st.success("Saved.")
+                    st.rerun()
+                else:
+                    st.error("Could not save lanes. Try again.")
+        with col2:
+            if st.button("Reset lanes"):
+                ok = update_member_custom_fields(member_id, {"lanes": []})
+                if ok:
+                    st.session_state["selected_lanes"] = []
+                    st.success("Reset. Please choose again.")
+                    st.rerun()
+                else:
+                    st.error("Could not reset lanes. Try again.")
 
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        save = st.button("Save lanes", use_container_width=True)
-    with col2:
-        st.markdown('<span class="smallmuted">Black includes all lanes automatically.</span>', unsafe_allow_html=True)
-
-    if save:
-        if not member_id:
-            st.error("Could not identify member ID from token payload.")
-            st.stop()
-
-        fields = {LANE_TO_FIELD[lane]: (lane in pick) for lane in LANES_ALL}
-        ok = update_member_custom_fields(member_id, fields)
-        if not ok:
-            st.error("Could not save lane preferences. Check MEMBERSTACK_API_KEY and try again.")
-            st.stop()
-
-        st.success("Saved. Loading your engine…")
-        st.rerun()
-
+# If Starter/Pro has no lanes selected yet, force them to pick before showing dashboards
+if tier in ("Starter", "Pro") and max_lanes > 0 and len(selected_lanes) == 0:
+    st.warning("Choose your lane(s) to unlock dashboards. Open **Manage lanes** above.")
     st.stop()
+
+# Safety: if someone downgraded and has too many saved lanes, trim + save
+if tier in ("Starter", "Pro") and len(selected_lanes) > max_lanes and member_id:
+    trimmed = selected_lanes[:max_lanes]
+    ok = update_member_custom_fields(member_id, {"lanes": trimmed})
+    if ok:
+        st.session_state["selected_lanes"] = trimmed
+        selected_lanes = trimmed
 
 # =================================================
 # DASHBOARDS — ONLY FOR SELECTED LANES
