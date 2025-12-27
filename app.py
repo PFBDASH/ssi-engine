@@ -269,13 +269,42 @@ def update_member_custom_fields(member_id: str, custom_fields: Dict[str, Any]) -
         return False
 
 
-def lane_status(df: pd.DataFrame) -> str:
-    if df is None or df.empty:
-        return "No Data"
-    top = df.iloc[0]
-    if top.get("status") != "ok":
-        return "No Data"
-    return "Active" if float(top.get("ssi", 0)) >= 7 else "Stand Down"
+from datetime import datetime, time
+import pytz
+
+ET = pytz.timezone("US/Eastern")
+
+def market_state(lane: str, now_et=None):
+    now = now_et or datetime.now(ET)
+    wd = now.weekday()  # Mon=0 .. Sun=6
+    t = now.time()
+    lane = lane.lower()
+
+    # Crypto always open
+    if lane == "crypto":
+        return True, "Open"
+
+    # Forex: Sun 5pm → Fri 5pm ET
+    if lane == "forex":
+        if wd == 5:
+            return False, "Closed — Weekend"
+        if wd == 6:
+            return (t >= time(17,0)), "Open" if t >= time(17,0) else "Closed — Opens Sun 5pm ET"
+        if wd == 4:
+            return (t < time(17,0)), "Open" if t < time(17,0) else "Closed — Reopens Sun 5pm ET"
+        return True, "Open"
+
+    # Options: Mon–Fri 9:30am–4:00pm ET
+    if lane == "options":
+        if wd >= 5:
+            return False, "Closed — Weekend"
+        if time(9,30) <= t < time(16,0):
+            return True, "Open"
+        if t < time(9,30):
+            return False, "Closed — Opens 9:30am ET"
+        return False, "Closed — Reopens next session"
+
+    return False, "Closed"
 
 
 def show_lane(title: str, df: pd.DataFrame):
