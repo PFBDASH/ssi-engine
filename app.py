@@ -511,8 +511,9 @@ if not selected_lanes:
 # =================================================
 # DASHBOARDS — ONLY FOR SELECTED LANES
 # =================================================
-st.markdown("### Your Market Engine")
-st.caption(f"Tier: {tier} • Active Lanes: {', '.join(selected_lanes)}")
+st.markdown("## Your Market Engine")
+st.caption(f"Access Tier: {tier}   |   Active Lanes: {', '.join(selected_lanes)}")
+st.divider()
 
 tabs = st.tabs(selected_lanes)
 for i, lane in enumerate(selected_lanes):
