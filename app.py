@@ -139,7 +139,7 @@ def verify_memberstack_token(token: str) -> Optional[Dict[str, Any]]:
     # A) Verify token (auth sanity check)
     try:
         r = requests.post(
-            "https://admin.memberstack.com/members/verifyToken",
+            "https://admin.memberstack.com/members/verify-token",
             headers=headers,
             json={"token": token},
             timeout=15,
