@@ -78,6 +78,26 @@ st.markdown(
 # =========================================================
 # HELPERS
 # =========================================================
+import base64
+
+def _jwt_member_id(token: str) -> Optional[str]:
+    """
+    Memberstack ms= token is a JWT. We can decode payload WITHOUT verifying signature
+    just to read the member id for lookup.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload_b64 = parts[1]
+        # base64url padding
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload_json = base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
+        data = json.loads(payload_json)
+        mid = data.get("id")
+        return mid if isinstance(mid, str) and mid.strip() else None
+    except Exception:
+        return None
 def ny_now() -> datetime:
    return datetime.now(ZoneInfo("America/New_York"))
 def ny_date_key() -> str:
@@ -116,38 +136,50 @@ def verify_memberstack_token(token: str) -> Optional[Dict[str, Any]]:
         "Content-Type": "application/json",
     }
 
-    # Step 1 — Verify token
-    verify_url = "https://admin.memberstack.com/members/verify-token"
+    # A) Verify token (auth sanity check)
     try:
-        r = requests.post(verify_url, headers=headers, json={"token": token}, timeout=15)
+        r = requests.post(
+            "https://admin.memberstack.com/members/verifyToken",
+            headers=headers,
+            json={"token": token},
+            timeout=15,
+        )
         if r.status_code != 200:
             return None
-        payload = r.json()
+        verify_payload = r.json()
     except Exception:
         return None
 
-    # Step 2 — If billing missing, pull full member profile
-    member_id = get_member_id(payload)
-    if member_id:
-        profile_url = f"https://admin.memberstack.com/members/{member_id}"
-        try:
-            r2 = requests.get(profile_url, headers=headers, timeout=15)
-            if r2.status_code == 200:
-                return r2.json()
-        except Exception:
-            pass
+    # B) Always fetch full member profile using member_id from JWT (reliable)
+    member_id = _jwt_member_id(token)
+    if not member_id:
+        return verify_payload  # fallback only
 
-    return payload
+    try:
+        r2 = requests.get(
+            f"https://admin.memberstack.com/members/{member_id}",
+            headers=headers,
+            timeout=15,
+        )
+        if r2.status_code == 200:
+            return r2.json()
+    except Exception:
+        pass
+
+    return verify_payload
 def get_member(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-   # Memberstack verifyToken may return:
-   # - { member: {...} }
-   # - { data: { member: {...} } }
-   if isinstance(payload.get("member"), dict):
-       return payload["member"]
-   data = payload.get("data")
-   if isinstance(data, dict) and isinstance(data.get("member"), dict):
-       return data["member"]
-   return None
+    # Some responses return the member object at the root (profile endpoint)
+    if isinstance(payload, dict) and isinstance(payload.get("id"), str) and payload.get("id", "").startswith("mem_"):
+        return payload
+
+    if isinstance(payload.get("member"), dict):
+        return payload["member"]
+
+    data = payload.get("data")
+    if isinstance(data, dict) and isinstance(data.get("member"), dict):
+        return data["member"]
+
+    return None
 def get_member_id(payload: Dict[str, Any]) -> Optional[str]:
    member = get_member(payload)
    if isinstance(member, dict):
