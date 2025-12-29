@@ -110,7 +110,7 @@ def get_query_param(name: str) -> Optional[str]:
 def verify_memberstack_token(token: str) -> Optional[Dict[str, Any]]:
    if not token or not MEMBERSTACK_API_KEY:
        return None
-   url = "https://admin.memberstack.com/members/verifyToken"
+   url = "https://admin.memberstack.com/members/verify-token"
    headers = {"X-API-KEY": MEMBERSTACK_API_KEY, "Content-Type": "application/json"}
    body = {"token": token}
    try:
