@@ -108,18 +108,30 @@ def get_query_param(name: str) -> Optional[str]:
    except Exception:
        return None
 def verify_memberstack_token(token: str) -> Optional[Dict[str, Any]]:
-   if not token or not MEMBERSTACK_API_KEY:
-       return None
-   url = "https://admin.memberstack.com/members/verify-token"
-   headers = {"X-API-KEY": MEMBERSTACK_API_KEY, "Content-Type": "application/json"}
-   body = {"token": token}
-   try:
-       r = requests.post(url, headers=headers, json=body, timeout=15)
-       if r.status_code != 200:
-           return None
-       return r.json()
-   except Exception:
-       return None
+    """
+    Verifies token with Memberstack Admin API.
+    Uses header X-API-KEY: <secret>
+    """
+    if not token or not MEMBERSTACK_API_KEY:
+        return None
+
+    token = token.strip()
+
+    # ✅ Correct endpoint for Memberstack Admin REST
+    url = "https://admin.memberstack.com/members/verify-token"
+    headers = {
+        "X-API-KEY": MEMBERSTACK_API_KEY,
+        "Content-Type": "application/json",
+    }
+    body = {"token": token}
+
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=15)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception:
+        return None
 def get_member(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
    # Memberstack verifyToken may return:
    # - { member: {...} }
