@@ -117,7 +117,7 @@ def verify_memberstack_token(token: str) -> Optional[Dict[str, Any]]:
     }
 
     # Step 1 — Verify token
-    verify_url = "https://admin.memberstack.com/members/verifyToken"
+    verify_url = "https://admin.memberstack.com/members/verify-token"
     try:
         r = requests.post(verify_url, headers=headers, json={"token": token}, timeout=15)
         if r.status_code != 200:
