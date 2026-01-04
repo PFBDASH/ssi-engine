@@ -3,35 +3,59 @@ import requests
 import pandas as pd
 from io import StringIO
 
+# =========================================================
+# Shared HTTP config (performance + reliability)
+# =========================================================
+_SESSION = requests.Session()
+_HEADERS = {"User-Agent": "SSI/1.0 (+Render)"}
+# Faster failure for flaky upstreams; prevents long multi-ticker stalls
+_TIMEOUT = (3.05, 8)  # (connect_timeout, read_timeout)
+
 
 # ---------- CRYPTO (Kraken OHLC) ----------
 def fetch_crypto_ohlc(symbol: str, interval: int = 60) -> pd.DataFrame:
     """
     symbol examples: BTCUSD, ETHUSD, SOLUSD
     Uses Kraken public OHLC endpoint.
+    Returns dataframe with: time/open/high/low/close (+ volume/vwap/count).
     """
     pair = symbol.replace("USD", "/USD")
     url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval}"
-    r = requests.get(url, timeout=20).json()
+
+    try:
+        resp = _SESSION.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return pd.DataFrame()
 
     # Kraken returns {"error":[], "result":{ "<pair>":[...], "last":...}}
-    result = r.get("result", {})
-    # Find the first list in result values (ignore "last")
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
     ohlc_key = None
     for k, v in result.items():
         if isinstance(v, list):
             ohlc_key = k
             break
     if ohlc_key is None:
-        raise ValueError(f"Kraken OHLC missing for {symbol}: {r}")
+        return pd.DataFrame()
 
-    data = result[ohlc_key]
+    data = result.get(ohlc_key, [])
+    if not isinstance(data, list) or not data:
+        return pd.DataFrame()
+
     df = pd.DataFrame(
         data,
         columns=["time", "open", "high", "low", "close", "vwap", "volume", "count"],
     )
-    df["time"] = pd.to_datetime(df["time"], unit="s")
-    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
+
+    # Robust parsing
+    df["time"] = pd.to_datetime(df["time"], unit="s", errors="coerce")
+    df = df.dropna(subset=["time"])
+    for c in ["open", "high", "low", "close", "vwap", "volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["close"])
+
     return df.reset_index(drop=True)
 
 
@@ -40,22 +64,36 @@ def fetch_fx_daily(pair: str) -> pd.DataFrame:
     """
     pair examples: EURUSD, USDJPY
     Stooq daily CSV endpoint.
+    Returns dataframe with: time/open/high/low/close
     """
     sym = pair.upper()
     url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
 
-    df = pd.read_csv(StringIO(r.text))
-    if df.empty:
-        raise ValueError(f"Empty FX data for {pair}")
+    try:
+        r = _SESSION.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+        r.raise_for_status()
+        df = pd.read_csv(StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    # Stooq sometimes returns empty/odd payloads; fail soft
+    if df.empty or "Date" not in df.columns:
+        return pd.DataFrame()
 
     df.rename(
         columns={"Date": "time", "Open": "open", "High": "high", "Low": "low", "Close": "close"},
         inplace=True,
     )
-    df["time"] = pd.to_datetime(df["time"])
-    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
+
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df = df.dropna(subset=["time"])
+
+    # Numeric coercion (never raise)
+    for c in ["open", "high", "low", "close"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["close"])
+
     return df.tail(350).reset_index(drop=True)
 
 
@@ -64,20 +102,32 @@ def fetch_equity_daily(ticker: str) -> pd.DataFrame:
     """
     ticker examples: SPY, NVDA
     Stooq US equities generally use: <ticker>.us (lowercase).
+    Returns dataframe with: time/open/high/low/close
     """
     sym = f"{ticker.lower()}.us"
     url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
 
-    df = pd.read_csv(StringIO(r.text))
-    if df.empty:
-        raise ValueError(f"Empty equity data for {ticker}")
+    try:
+        r = _SESSION.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+        r.raise_for_status()
+        df = pd.read_csv(StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty or "Date" not in df.columns:
+        return pd.DataFrame()
 
     df.rename(
         columns={"Date": "time", "Open": "open", "High": "high", "Low": "low", "Close": "close"},
         inplace=True,
     )
-    df["time"] = pd.to_datetime(df["time"])
-    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
+
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df = df.dropna(subset=["time"])
+
+    for c in ["open", "high", "low", "close"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["close"])
+
     return df.tail(350).reset_index(drop=True)
