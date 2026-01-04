@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple, Dict, Any, List
 from functools import lru_cache
+from typing import Optional, Tuple, Dict, Any, List
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import pickle
 
 import universe
 from data_sources import fetch_equity_daily  # LC uses Stooq via your data_sources.py
@@ -28,6 +29,12 @@ def _today_utc_key() -> str:
 # Data normalization (works for yfinance + stooq-style dfs)
 # =========================================================
 def _normalize_ohlc_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize columns to: Open, High, Low, Close, Volume (when available)
+    Accepts:
+      - yfinance history() output (may be MultiIndex)
+      - stooq output from fetch_equity_daily (time/open/high/low/close[/volume])
+    """
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -46,7 +53,7 @@ def _normalize_ohlc_columns(df: pd.DataFrame) -> pd.DataFrame:
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
 
     # Normalize names (case + Adj Close)
-    rename = {}
+    rename: Dict[Any, str] = {}
     for c in df.columns:
         cl = str(c).strip().lower()
         if cl == "open":
@@ -80,6 +87,9 @@ def _normalize_ohlc_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _get_close_series(df: pd.DataFrame) -> pd.Series:
+    """
+    Guarantee a 1D Series for Close.
+    """
     if df is None or df.empty or "Close" not in df.columns:
         return pd.Series(dtype=float)
 
@@ -115,9 +125,7 @@ def _cached_yf_history(symbol: str, days: int, interval: str, day_key: str) -> b
     t = yf.Ticker(symbol)
     df = t.history(start=start, end=end, interval=interval, auto_adjust=False)
     df = _normalize_ohlc_columns(df)
-
-    # pickle bytes (fast + keeps index/types)
-    return df.to_pickle(None)  # type: ignore[arg-type]
+    return pickle.dumps(df, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def _fetch_history_yf(symbol: str, days: int = 240, interval: str = "1d") -> pd.DataFrame:
@@ -126,9 +134,10 @@ def _fetch_history_yf(symbol: str, days: int = 240, interval: str = "1d") -> pd.
     """
     try:
         b = _cached_yf_history(symbol, days, interval, _today_utc_key())
-        # pandas allows reading from bytes via BytesIO
-        from io import BytesIO
-        return pd.read_pickle(BytesIO(b))
+        df = pickle.loads(b)
+        if isinstance(df, pd.DataFrame):
+            return df
+        return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
@@ -141,18 +150,20 @@ def _cached_stooq_daily(symbol: str, day_key: str) -> bytes:
     """
     df = fetch_equity_daily(symbol)  # should be fast; must have timeouts in data_sources
     df = _normalize_ohlc_columns(df)
-    return df.to_pickle(None)  # type: ignore[arg-type]
+    return pickle.dumps(df, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def _fetch_equity_stooq(symbol: str) -> pd.DataFrame:
     """
-    Used for Long Cycle lane only. Uses your data_sources.fetch_equity_daily().
+    Used for Long Cycle lane only.
     Returns normalized OHLC dataframe with a DatetimeIndex.
     """
     try:
         b = _cached_stooq_daily(symbol, _today_utc_key())
-        from io import BytesIO
-        return pd.read_pickle(BytesIO(b))
+        df = pickle.loads(b)
+        if isinstance(df, pd.DataFrame):
+            return df
+        return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
@@ -161,6 +172,7 @@ def _fetch_equity_stooq(symbol: str) -> pd.DataFrame:
 # Indicators
 # =========================================================
 def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    # fallback if High/Low missing
     if not {"High", "Low", "Close"}.issubset(df.columns):
         c = _get_close_series(df)
         if c.empty:
@@ -194,7 +206,7 @@ def _score_trend(df: pd.DataFrame) -> Tuple[float, Dict[str, Any]]:
     ema50 = close.ewm(span=50, adjust=False).mean()
     ema200 = close.ewm(span=200, adjust=False).mean()
 
-    slope = (ema50.iloc[-1] - ema50.iloc[-11]) / max(1e-9, close.iloc[-1])
+    slope = (ema50.iloc[-1] - ema50.iloc[-11]) / max(1e-9, float(close.iloc[-1]))
     slope_score = _clamp((slope * 1000) + 5, 0, 10)
 
     if ema20.iloc[-1] > ema50.iloc[-1] > ema200.iloc[-1]:
@@ -244,6 +256,9 @@ def _regime_label(trend_score: float, vol_score: float) -> str:
 # Lane 4: Long Cycle / Phase-4 (Wealth Launchpad)
 # =========================================================
 def _map_linear(x: float, x0: float, x1: float, y0: float = 0.0, y1: float = 10.0) -> float:
+    """
+    Map x from [x0, x1] -> [y0, y1], clamp at ends.
+    """
     if x1 == x0:
         return y0
     t = (x - x0) / (x1 - x0)
@@ -252,23 +267,33 @@ def _map_linear(x: float, x0: float, x1: float, y0: float = 0.0, y1: float = 10.
 
 
 def _score_phase4(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None) -> Tuple[float, Dict[str, Any]]:
+    """
+    Phase-4 favors:
+      - long base / compression
+      - volatility + volume drying up
+      - stealth relative strength vs market
+      - price not extended (still near its long base)
+    Output score: 0..10
+    """
     close = _get_close_series(df)
     vol = _get_volume_series(df)
 
     if close.empty or len(close) < 260:
         return 0.0, {"reason": "insufficient_bars"}
 
-    w_base = 252
-    w_mid = 126
-    w_short = 20
+    w_base = 252   # ~1y
+    w_mid = 126    # ~6m
+    w_short = 20   # ~1m
 
     c_base = close.iloc[-w_base:]
     c_mid = close.iloc[-w_mid:]
     price = float(close.iloc[-1])
 
+    # 1) Base compression: 1y range % (lower is better)
     rng_pct = (float(c_base.max()) - float(c_base.min())) / max(1e-9, float(c_base.mean()))
     base_score = 10.0 - _map_linear(rng_pct, 0.15, 0.60, 0.0, 10.0)
 
+    # 2) Volatility drying: short ATR% vs base ATR%
     atr = _atr(df, 14)
     if atr.empty or np.isnan(atr.iloc[-1]):
         return 0.0, {"reason": "atr_unavailable"}
@@ -278,6 +303,7 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None)
     vol_ratio = atrp_short / max(1e-9, atrp_base)
     voldry_score = 10.0 - _map_linear(vol_ratio, 0.60, 1.25, 0.0, 10.0)
 
+    # 3) Volume drying (optional; if volume missing, neutral 5)
     if vol.empty or len(vol) < w_base:
         vdry_score = 5.0
         v_ratio = float("nan")
@@ -287,6 +313,7 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None)
         v_ratio = v_short / max(1e-9, v_base)
         vdry_score = 10.0 - _map_linear(v_ratio, 0.70, 1.10, 0.0, 10.0)
 
+    # 4) Relative strength vs market
     rs_score = 5.0
     rs_delta = float("nan")
     if benchmark_df is not None and not benchmark_df.empty:
@@ -298,9 +325,10 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None)
             rs_delta = sym_ret - b_ret
             rs_score = _map_linear(rs_delta, -0.10, 0.10, 0.0, 10.0)
 
+    # 5) Not extended
     base_high = float(c_base.max())
     base_low = float(c_base.min())
-    pos = (price - base_low) / max(1e-9, (base_high - base_low))
+    pos = (price - base_low) / max(1e-9, (base_high - base_low))  # 0..1
 
     if pos < 0.60:
         extent_score = _map_linear(pos, 0.20, 0.60, 0.0, 10.0)
@@ -318,7 +346,7 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None)
     )
     score = float(_clamp(score, 0.0, 10.0))
 
-    details = {
+    details: Dict[str, Any] = {
         "range_pct_1y": float(rng_pct),
         "vol_ratio": float(vol_ratio),
         "vol_short_atrp": float(atrp_short),
@@ -384,7 +412,7 @@ def _next_monthly_expiry() -> str:
     month = 1 if d.month == 12 else d.month + 1
     first = datetime(year, month, 1).date()
 
-    fridays = []
+    fridays: List[Any] = []
     cur = first
     while cur.month == month:
         if cur.weekday() == 4:
@@ -485,38 +513,37 @@ def _score_symbol(label: str, symbol: str) -> Dict[str, Any]:
 # =========================================================
 # Scoring (Long Cycle / LC) — uses Stooq (NOT yfinance)
 # =========================================================
-from typing import Optional
+def _score_symbol_lc(symbol: str, benchmark_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    try:
+        df = _fetch_equity_stooq(symbol)
+        close = _get_close_series(df)
 
-def _score_symbol_lc(symbol: str, benchmark_df: Optional[pd.DataFrame] = None) -> dict:
-    df = _fetch_equity_stooq(symbol)
-    close = _get_close_series(df)
+        if close.empty or len(close) < 260:
+            return {
+                "lane": "LC",
+                "symbol": symbol,
+                "last": np.nan,
+                "phase4": 0.0,
+                "regime": "No Data",
+                "reco": "",
+                "status": "no_data",
+            }
 
-    if close.empty or len(close) < 260:
+        last = float(close.iloc[-1])
+
+        phase4_score, _details = _score_phase4(df, benchmark_df)
+        regime = _phase4_label(phase4_score)
+        reco = _lane_reco_lc(symbol, phase4_score)
+
         return {
             "lane": "LC",
             "symbol": symbol,
-            "last": np.nan,
-            "phase4": 0.0,
-            "regime": "No Data",
-            "reco": "",
-            "status": "no_data",
+            "last": round(last, 4),
+            "phase4": round(phase4_score, 2),
+            "regime": regime,
+            "reco": reco,
+            "status": "ok",
         }
-
-    last = float(close.iloc[-1])
-
-    phase4_score, _details = _score_phase4(df, benchmark_df)
-    regime = _phase4_label(phase4_score)
-    reco = _lane_reco_lc(symbol, phase4_score)
-
-    return {
-        "lane": "LC",
-        "symbol": symbol,
-        "last": round(last, 4),
-        "phase4": round(phase4_score, 2),
-        "regime": regime,
-        "reco": reco,
-        "status": "ok",
-    }
     except Exception:
         # hard isolation: never let one LC ticker break the scan
         return {
@@ -572,7 +599,7 @@ def run_options_scan() -> pd.DataFrame:
 
 
 def run_lc_scan() -> pd.DataFrame:
-    lc = []
+    lc: List[str] = []
     for name in ("LC", "LC_UNIVERSE", "LONG_CYCLE", "WEALTH"):
         if hasattr(universe, name):
             try:
