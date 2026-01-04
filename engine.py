@@ -486,35 +486,35 @@ def _score_symbol(label: str, symbol: str) -> Dict[str, Any]:
 # Scoring (Long Cycle / LC) — uses Stooq (NOT yfinance)
 # =========================================================
 def _score_symbol_lc(symbol: str, benchmark_df: pd.DataFrame | None = None) -> dict:
-    df = _fetch_equity_stooq(symbol)   # <-- this line
+    df = _fetch_equity_stooq(symbol)
     close = _get_close_series(df)
 
-        if close.empty or len(close) < 260:
-            return {
-                "lane": "LC",
-                "symbol": symbol,
-                "last": np.nan,
-                "phase4": 0.0,
-                "regime": "No Data",
-                "reco": "",
-                "status": "no_data",
-            }
-
-        last = float(close.iloc[-1])
-
-        phase4_score, _details = _score_phase4(df, benchmark_df)
-        regime = _phase4_label(phase4_score)
-        reco = _lane_reco_lc(symbol, phase4_score)
-
+    if close.empty or len(close) < 260:
         return {
             "lane": "LC",
             "symbol": symbol,
-            "last": round(last, 4),
-            "phase4": round(phase4_score, 2),
-            "regime": regime,
-            "reco": reco,
-            "status": "ok",
+            "last": np.nan,
+            "phase4": 0.0,
+            "regime": "No Data",
+            "reco": "",
+            "status": "no_data",
         }
+
+    last = float(close.iloc[-1])
+
+    phase4_score, _details = _score_phase4(df, benchmark_df)
+    regime = _phase4_label(phase4_score)
+    reco = _lane_reco_lc(symbol, phase4_score)
+
+    return {
+        "lane": "LC",
+        "symbol": symbol,
+        "last": round(last, 4),
+        "phase4": round(phase4_score, 2),
+        "regime": regime,
+        "reco": reco,
+        "status": "ok",
+    }
     except Exception:
         # hard isolation: never let one LC ticker break the scan
         return {
