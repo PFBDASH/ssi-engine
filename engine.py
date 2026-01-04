@@ -1,15 +1,15 @@
-# engine.py
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict, Any, List
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 import universe
-from data_sources import fetch_equity_daily  # <-- LC uses Stooq via your data_sources.py
+from data_sources import fetch_equity_daily  # LC uses Stooq via your data_sources.py
 
 
 # =========================================================
@@ -19,16 +19,15 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _today_utc_key() -> str:
+    # used for caching across streamlit reruns within the same Render worker
+    return _now_utc().strftime("%Y-%m-%d")
+
+
 # =========================================================
 # Data normalization (works for yfinance + stooq-style dfs)
 # =========================================================
 def _normalize_ohlc_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize columns to: Open, High, Low, Close, Volume (when available)
-    Accepts:
-      - yfinance history() output (may be MultiIndex)
-      - stooq output from fetch_equity_daily (time/open/high/low/close)
-    """
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -62,7 +61,7 @@ def _normalize_ohlc_columns(df: pd.DataFrame) -> pd.DataFrame:
             rename[c] = "Volume"
     df = df.rename(columns=rename)
 
-    # If we ended up with duplicate columns named "Close" etc, keep first occurrence
+    # If duplicates named "Close" etc, keep first occurrence
     df = df.loc[:, ~df.columns.duplicated()]
 
     # Ensure DatetimeIndex
@@ -81,10 +80,6 @@ def _normalize_ohlc_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _get_close_series(df: pd.DataFrame) -> pd.Series:
-    """
-    Guarantee a 1D Series for Close.
-    Handles cases where df["Close"] returns a DataFrame due to duplicates.
-    """
     if df is None or df.empty or "Close" not in df.columns:
         return pd.Series(dtype=float)
 
@@ -106,31 +101,58 @@ def _get_volume_series(df: pd.DataFrame) -> pd.Series:
     return v
 
 
+# =========================================================
+# Lightweight in-process cache (per Render worker)
+# =========================================================
+@lru_cache(maxsize=1024)
+def _cached_yf_history(symbol: str, days: int, interval: str, day_key: str) -> bytes:
+    """
+    Cache serialized dataframe bytes to avoid repeated network calls on reruns.
+    day_key busts cache daily.
+    """
+    end = _now_utc()
+    start = end - timedelta(days=days)
+    t = yf.Ticker(symbol)
+    df = t.history(start=start, end=end, interval=interval, auto_adjust=False)
+    df = _normalize_ohlc_columns(df)
+
+    # pickle bytes (fast + keeps index/types)
+    return df.to_pickle(None)  # type: ignore[arg-type]
+
+
 def _fetch_history_yf(symbol: str, days: int = 240, interval: str = "1d") -> pd.DataFrame:
     """
-    Used for Crypto / Forex / Options lanes (your existing universe symbols).
+    Used for Crypto / Forex / Options lanes.
     """
     try:
-        end = _now_utc()
-        start = end - timedelta(days=days)
-        t = yf.Ticker(symbol)
-        df = t.history(start=start, end=end, interval=interval, auto_adjust=False)
-        return _normalize_ohlc_columns(df)
+        b = _cached_yf_history(symbol, days, interval, _today_utc_key())
+        # pandas allows reading from bytes via BytesIO
+        from io import BytesIO
+        return pd.read_pickle(BytesIO(b))
     except Exception:
         return pd.DataFrame()
 
 
-def _fetch_equity_stooq(symbol: str, days_hint: int = 900) -> pd.DataFrame:
+@lru_cache(maxsize=2048)
+def _cached_stooq_daily(symbol: str, day_key: str) -> bytes:
+    """
+    Cache serialized Stooq dataframe bytes to avoid re-fetch on reruns.
+    day_key busts cache daily.
+    """
+    df = fetch_equity_daily(symbol)  # should be fast; must have timeouts in data_sources
+    df = _normalize_ohlc_columns(df)
+    return df.to_pickle(None)  # type: ignore[arg-type]
+
+
+def _fetch_equity_stooq(symbol: str) -> pd.DataFrame:
     """
     Used for Long Cycle lane only. Uses your data_sources.fetch_equity_daily().
     Returns normalized OHLC dataframe with a DatetimeIndex.
     """
     try:
-        df = fetch_equity_daily(symbol)  # returns time/open/high/low/close
-        df = _normalize_ohlc_columns(df)
-        # fetch_equity_daily returns ~350 rows; that's okay for phase-4 (needs 260)
-        # days_hint kept for interface symmetry / future upgrades
-        return df
+        b = _cached_stooq_daily(symbol, _today_utc_key())
+        from io import BytesIO
+        return pd.read_pickle(BytesIO(b))
     except Exception:
         return pd.DataFrame()
 
@@ -139,7 +161,6 @@ def _fetch_equity_stooq(symbol: str, days_hint: int = 900) -> pd.DataFrame:
 # Indicators
 # =========================================================
 def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    # fallback if High/Low missing
     if not {"High", "Low", "Close"}.issubset(df.columns):
         c = _get_close_series(df)
         if c.empty:
@@ -205,7 +226,7 @@ def _score_vol(df: pd.DataFrame) -> Tuple[float, Dict[str, Any]]:
     price = float(close.iloc[-1])
     atrp = (atr_last / price) if price > 0 else 0.0
 
-    vol = _clamp((atrp / 0.08) * 10, 0, 10)  # map 0..8% to 0..10
+    vol = _clamp((atrp / 0.08) * 10, 0, 10)
     return float(vol), {"atr": atr_last, "atrp": atrp}
 
 
@@ -223,9 +244,6 @@ def _regime_label(trend_score: float, vol_score: float) -> str:
 # Lane 4: Long Cycle / Phase-4 (Wealth Launchpad)
 # =========================================================
 def _map_linear(x: float, x0: float, x1: float, y0: float = 0.0, y1: float = 10.0) -> float:
-    """
-    Map x from [x0, x1] -> [y0, y1], clamp at ends.
-    """
     if x1 == x0:
         return y0
     t = (x - x0) / (x1 - x0)
@@ -234,35 +252,23 @@ def _map_linear(x: float, x0: float, x1: float, y0: float = 0.0, y1: float = 10.
 
 
 def _score_phase4(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None) -> Tuple[float, Dict[str, Any]]:
-    """
-    Phase-4 favors:
-      - long base / compression
-      - volatility + volume drying up
-      - stealth relative strength vs market
-      - price not extended (still near its long base)
-    Output score: 0..10
-    """
     close = _get_close_series(df)
     vol = _get_volume_series(df)
 
     if close.empty or len(close) < 260:
         return 0.0, {"reason": "insufficient_bars"}
 
-    # Windows
-    w_base = 252   # ~1y
-    w_mid = 126    # ~6m
-    w_short = 20   # ~1m
+    w_base = 252
+    w_mid = 126
+    w_short = 20
 
     c_base = close.iloc[-w_base:]
     c_mid = close.iloc[-w_mid:]
     price = float(close.iloc[-1])
 
-    # 1) Base compression: 1y range % (lower is better)
     rng_pct = (float(c_base.max()) - float(c_base.min())) / max(1e-9, float(c_base.mean()))
-    # Good: ~0.15 or less. Bad: ~0.60+
     base_score = 10.0 - _map_linear(rng_pct, 0.15, 0.60, 0.0, 10.0)
 
-    # 2) Volatility drying: short ATR% vs base ATR%
     atr = _atr(df, 14)
     if atr.empty or np.isnan(atr.iloc[-1]):
         return 0.0, {"reason": "atr_unavailable"}
@@ -270,10 +276,8 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None)
     atrp_short = float(atr.iloc[-w_short:].mean()) / max(1e-9, price)
     atrp_base = float(atr.iloc[-w_base:].mean()) / max(1e-9, float(c_base.mean()))
     vol_ratio = atrp_short / max(1e-9, atrp_base)
-    # Good: 0.55-0.75, bad: 1.2+
     voldry_score = 10.0 - _map_linear(vol_ratio, 0.60, 1.25, 0.0, 10.0)
 
-    # 3) Volume drying (optional; if volume missing, neutral 5)
     if vol.empty or len(vol) < w_base:
         vdry_score = 5.0
         v_ratio = float("nan")
@@ -281,10 +285,8 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None)
         v_base = float(vol.iloc[-w_base:].mean())
         v_short = float(vol.iloc[-w_short:].mean())
         v_ratio = v_short / max(1e-9, v_base)
-        # Good: <0.70, bad: >1.10
         vdry_score = 10.0 - _map_linear(v_ratio, 0.70, 1.10, 0.0, 10.0)
 
-    # 4) Relative strength vs market (SPY by default if provided)
     rs_score = 5.0
     rs_delta = float("nan")
     if benchmark_df is not None and not benchmark_df.empty:
@@ -294,14 +296,12 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None)
             b_slice = b_close.iloc[-w_mid:]
             b_ret = float(b_slice.iloc[-1] / b_slice.iloc[0] - 1.0)
             rs_delta = sym_ret - b_ret
-            # Good: +10% outperformance, bad: -10% underperformance
             rs_score = _map_linear(rs_delta, -0.10, 0.10, 0.0, 10.0)
 
-    # 5) Not extended: prefer price near top of base but not a blow-off
     base_high = float(c_base.max())
     base_low = float(c_base.min())
-    pos = (price - base_low) / max(1e-9, (base_high - base_low))  # 0..1
-    # Ideal pos is ~0.60-0.85 (tight, near upper range). Too low = dead. Too high = blow-off.
+    pos = (price - base_low) / max(1e-9, (base_high - base_low))
+
     if pos < 0.60:
         extent_score = _map_linear(pos, 0.20, 0.60, 0.0, 10.0)
     elif pos <= 0.85:
@@ -309,7 +309,6 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None)
     else:
         extent_score = 10.0 - _map_linear(pos, 0.85, 1.00, 0.0, 10.0)
 
-    # Weighted blend
     score = (
         0.26 * base_score +
         0.22 * voldry_score +
@@ -487,11 +486,38 @@ def _score_symbol(label: str, symbol: str) -> Dict[str, Any]:
 # Scoring (Long Cycle / LC) — uses Stooq (NOT yfinance)
 # =========================================================
 def _score_symbol_lc(symbol: str, benchmark_df: pd.DataFrame | None = None) -> dict:
-    # pull more history for LC / Phase-4
-    df = _fetch_history(symbol, days=900, interval="1d")
-    close = _get_close_series(df)
+    try:
+        df = _fetch_equity_stooq(symbol)
+        close = _get_close_series(df)
 
-    if close.empty or len(close) < 260:
+        if close.empty or len(close) < 260:
+            return {
+                "lane": "LC",
+                "symbol": symbol,
+                "last": np.nan,
+                "phase4": 0.0,
+                "regime": "No Data",
+                "reco": "",
+                "status": "no_data",
+            }
+
+        last = float(close.iloc[-1])
+
+        phase4_score, _details = _score_phase4(df, benchmark_df)
+        regime = _phase4_label(phase4_score)
+        reco = _lane_reco_lc(symbol, phase4_score)
+
+        return {
+            "lane": "LC",
+            "symbol": symbol,
+            "last": round(last, 4),
+            "phase4": round(phase4_score, 2),
+            "regime": regime,
+            "reco": reco,
+            "status": "ok",
+        }
+    except Exception:
+        # hard isolation: never let one LC ticker break the scan
         return {
             "lane": "LC",
             "symbol": symbol,
@@ -501,22 +527,6 @@ def _score_symbol_lc(symbol: str, benchmark_df: pd.DataFrame | None = None) -> d
             "reco": "",
             "status": "no_data",
         }
-
-    last = float(close.iloc[-1])
-
-    phase4_score, _details = _score_phase4(df, benchmark_df)
-    regime = _phase4_label(phase4_score)
-    reco = _lane_reco_lc(symbol, phase4_score)
-
-    return {
-        "lane": "LC",
-        "symbol": symbol,
-        "last": round(last, 4),
-        "phase4": round(phase4_score, 2),
-        "regime": regime,
-        "reco": reco,
-        "status": "ok",
-    }
 
 
 # =========================================================
@@ -531,7 +541,14 @@ def _run_lane(label: str, symbols: List[str]) -> pd.DataFrame:
 
 
 def _run_lane_lc(symbols: List[str]) -> pd.DataFrame:
-    rows = [_score_symbol_lc(s) for s in symbols]
+    if not symbols:
+        return pd.DataFrame(columns=["lane", "symbol", "last", "phase4", "regime", "reco", "status"])
+
+    # fetch benchmark once (if available)
+    bench_symbol = getattr(universe, "LC_BENCHMARK", "SPY")
+    benchmark_df = _fetch_equity_stooq(bench_symbol) if bench_symbol else pd.DataFrame()
+
+    rows = [_score_symbol_lc(s, benchmark_df) for s in symbols]
     df = pd.DataFrame(rows)
     if df.empty:
         return pd.DataFrame(columns=["lane", "symbol", "last", "phase4", "regime", "reco", "status"])
@@ -577,7 +594,6 @@ def run_full_scan() -> Dict[str, Any]:
         x = pd.to_numeric(df[col], errors="coerce").dropna()
         return float(x.iloc[0]) if len(x) else 0.0
 
-    # headline across 4 lanes (LC uses "phase4")
     headline = round(
         (best_val(crypto, "ssi") + best_val(fx, "ssi") + best_val(opts, "ssi") + best_val(lc, "phase4")) / 4.0,
         2,
