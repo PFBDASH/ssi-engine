@@ -16,36 +16,34 @@ import engine
 # =========================================================
 st.set_page_config(page_title="SSI Market Decision Engine", layout="wide")
 
-# Memberstack / Webflow config (ENV VARS)
+# ENV VARS (Render)
 MEMBERSTACK_API_KEY = os.getenv("MEMBERSTACK_API_KEY", "").strip()
 WEBFLOW_BASE_URL = os.getenv("WEBFLOW_BASE_URL", "").strip()
+WEBFLOW_LOGIN_PATH = (os.getenv("WEBFLOW_LOGIN_PATH", "/sign-in") or "/sign-in").strip()
+WEBFLOW_PLANS_PATH = (os.getenv("WEBFLOW_PLANS_PATH", "/plans") or "/plans").strip()
 
-WEBFLOW_LOGIN_PATH = os.getenv("WEBFLOW_LOGIN_PATH", "/sign-in").strip() or "/sign-in"
-WEBFLOW_PLANS_PATH = os.getenv("WEBFLOW_PLANS_PATH", "/plans").strip() or "/plans"
-
-# Admin overrides (ENV VARS)
 SSI_ADMIN_EMAILS = [e.strip().lower() for e in os.getenv("SSI_ADMIN_EMAILS", "").split(",") if e.strip()]
 SSI_ADMIN_MEMBER_IDS = [m.strip() for m in os.getenv("SSI_ADMIN_MEMBER_IDS", "").split(",") if m.strip()]
 SSI_ADMIN_CODE = os.getenv("SSI_ADMIN_CODE", "").strip()
 
-# Your Memberstack price IDs
+# Memberstack price IDs (YOUR IDs)
 PRICE_STARTER = "prc_ssi-starter-x54n0gfn"
 PRICE_PRO = "prc_ssi-pro-y54p0hul"
 PRICE_BLACK = "prc_ssi-black-d34q0h3p"
 
-# Lanes (now 4)
-LANES_ALL = ["Crypto", "Forex", "Options", "Long Cycle"]  # Lane 4 = US equities only
-CUSTOMFIELD_SELECTED_LANES = "selectedLanes"
+# Lanes
+LANES_ALL = ["Crypto", "Forex", "Options", "Long Cycle"]
+CUSTOMFIELD_SELECTED_LANES = "selectedLanes"  # Memberstack custom field key
 
 # =========================================================
-# SMALL UI STYLE
+# STYLE
 # =========================================================
 st.markdown(
     """
 <style>
   .smallmuted { color: rgba(255,255,255,0.65); font-size: 0.9rem; }
   .card {
-    padding: 0.8rem 1rem;
+    padding: 0.85rem 1rem;
     border-radius: 14px;
     border: 1px solid rgba(255,255,255,0.12);
     background: rgba(255,255,255,0.03);
@@ -62,7 +60,7 @@ st.markdown(
     border: 1px solid rgba(255,120,120,0.25);
     background: rgba(255,120,120,0.06);
     border-radius: 14px;
-    padding: 0.8rem 1rem;
+    padding: 0.85rem 1rem;
   }
   .brandbar {
     border: 1px solid rgba(255,255,255,0.10);
@@ -77,7 +75,7 @@ st.markdown(
 )
 
 # =========================================================
-# HELPERS
+# TIME HELPERS
 # =========================================================
 def ny_now() -> datetime:
     return datetime.now(ZoneInfo("America/New_York"))
@@ -86,8 +84,11 @@ def ny_date_key() -> str:
     return ny_now().strftime("%Y-%m-%d")
 
 def is_weekend_ny() -> bool:
-    return ny_now().weekday() >= 5
+    return ny_now().weekday() >= 5  # Sat/Sun
 
+# =========================================================
+# URL HELPERS
+# =========================================================
 def build_webflow_url(path: str) -> Optional[str]:
     if not WEBFLOW_BASE_URL:
         return None
@@ -99,7 +100,7 @@ LOGIN_URL = build_webflow_url(WEBFLOW_LOGIN_PATH)
 PLANS_URL = build_webflow_url(WEBFLOW_PLANS_PATH)
 
 def get_query_param(name: str) -> Optional[str]:
-    # new streamlit
+    # New streamlit
     try:
         qp = st.query_params
         v = qp.get(name)
@@ -108,21 +109,23 @@ def get_query_param(name: str) -> Optional[str]:
         return v
     except Exception:
         pass
-    # older streamlit
+    # Old streamlit fallback
     try:
         params = st.experimental_get_query_params()
         return params.get(name, [None])[0]
     except Exception:
         return None
 
+# =========================================================
+# MEMBERSTACK HELPERS
+# =========================================================
 def _jwt_member_id(token: str) -> Optional[str]:
-    """Decode JWT payload without verifying signature, to extract member id for lookup."""
+    """Decode JWT payload (no signature verification) to extract member id."""
     try:
         parts = token.split(".")
         if len(parts) < 2:
             return None
-        payload_b64 = parts[1]
-        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
         payload_json = base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
         data = json.loads(payload_json)
         mid = data.get("id")
@@ -134,10 +137,7 @@ def verify_memberstack_token(token: str) -> Optional[Dict[str, Any]]:
     if not token or not MEMBERSTACK_API_KEY:
         return None
 
-    headers = {
-        "X-API-KEY": MEMBERSTACK_API_KEY,
-        "Content-Type": "application/json",
-    }
+    headers = {"X-API-KEY": MEMBERSTACK_API_KEY, "Content-Type": "application/json"}
 
     # Verify token
     try:
@@ -153,7 +153,7 @@ def verify_memberstack_token(token: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-    # Fetch full profile by member id from JWT
+    # Fetch full profile by member id
     member_id = _jwt_member_id(token)
     if not member_id:
         return verify_payload
@@ -182,35 +182,36 @@ def get_member(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 def get_member_id(payload: Dict[str, Any]) -> Optional[str]:
-    member = get_member(payload)
-    if isinstance(member, dict):
-        v = member.get("id") or member.get("memberId")
+    m = get_member(payload)
+    if isinstance(m, dict):
+        v = m.get("id") or m.get("memberId")
         if isinstance(v, str) and v.strip():
             return v.strip()
+    # fallback regex
     text = json.dumps(payload)
-    m2 = re.search(r'"memberId"\s*:\s*"([^"]+)"', text)
-    return m2.group(1) if m2 else None
+    mm = re.search(r'"memberId"\s*:\s*"([^"]+)"', text)
+    return mm.group(1) if mm else None
 
 def get_member_email(payload: Dict[str, Any]) -> Optional[str]:
-    member = get_member(payload)
-    if isinstance(member, dict):
-        v = member.get("email")
+    m = get_member(payload)
+    if isinstance(m, dict):
+        v = m.get("email")
         if isinstance(v, str) and v.strip():
             return v.strip()
+    # fallback regex
     text = json.dumps(payload)
-    m2 = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text)
-    return m2.group(0) if m2 else None
+    mm = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text)
+    return mm.group(0) if mm else None
 
 def extract_price_ids(payload: Dict[str, Any]) -> List[str]:
+    # simplest reliable: find prc_* anywhere
     text = json.dumps(payload)
-    candidates: List[str] = []
-    candidates += re.findall(r"prc_[a-zA-Z0-9\-_]+", text)
-    out = []
-    seen = set()
-    for c in candidates:
-        if c not in seen:
-            out.append(c)
-            seen.add(c)
+    found = re.findall(r"prc_[a-zA-Z0-9\-_]+", text)
+    out, seen = [], set()
+    for x in found:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
     return out
 
 def resolve_tier(price_ids: List[str]) -> str:
@@ -223,6 +224,8 @@ def resolve_tier(price_ids: List[str]) -> str:
     return "Free"
 
 def allowed_lane_count(tier: str) -> int:
+    # Locked model you stated:
+    # Starter = 1 lane, Pro = 2 lanes, Black = 4 lanes
     if tier == "Starter":
         return 1
     if tier == "Pro":
@@ -232,19 +235,21 @@ def allowed_lane_count(tier: str) -> int:
     return 0
 
 def get_selected_lanes_from_payload(payload: Dict[str, Any]) -> List[str]:
-    member = get_member(payload)
-    if not isinstance(member, dict):
+    m = get_member(payload)
+    if not isinstance(m, dict):
         return []
-    custom = member.get("customFields")
+    custom = m.get("customFields")
     if not isinstance(custom, dict):
         return []
     v = custom.get(CUSTOMFIELD_SELECTED_LANES)
+
     if isinstance(v, list):
         lanes = [x for x in v if isinstance(x, str)]
     elif isinstance(v, str):
         lanes = [x.strip() for x in v.split(",") if x.strip()]
     else:
         lanes = []
+
     out: List[str] = []
     for ln in lanes:
         if ln in LANES_ALL and ln not in out:
@@ -263,33 +268,8 @@ def update_member_custom_fields(member_id: str, custom_fields: Dict[str, Any]) -
     except Exception:
         return False
 
-def lane_status_from_df(df: Optional[pd.DataFrame], lane_name: str) -> str:
-    if lane_name == "Options" and is_weekend_ny():
-        return "Closed (Weekend)"
-    if df is None or df.empty:
-        return "No Data"
-    top = df.iloc[0]
-    if str(top.get("status", "")).lower() != "ok":
-        return "No Data"
-    try:
-        ssi_val = float(top.get("ssi", 0))
-    except Exception:
-        ssi_val = 0.0
-    return "Active" if ssi_val >= 7 else "Stand Down"
-
-def show_lane(title: str, df: Optional[pd.DataFrame]):
-    st.subheader(title)
-    if df is None or df.empty:
-        st.warning("No data available.")
-        return
-    reco = str(df.iloc[0].get("reco", "") or "").strip()
-    if reco:
-        st.success(reco)
-    cols = [c for c in ["symbol", "last", "trend", "vol", "ssi", "regime"] if c in df.columns]
-    st.dataframe(df[cols] if cols else df, use_container_width=True, hide_index=True)
-
 # =========================================================
-# SSI RATINGS (PUBLIC OUTPUT, PRIVATE LOGIC)
+# SSI OUTPUT HELPERS
 # =========================================================
 def ssi_grade(score_1_to_10: float) -> str:
     s = float(score_1_to_10 or 0.0)
@@ -319,46 +299,55 @@ def regime_descriptor(regime_value: Any) -> str:
         return "Weak"
     return "Neutral"
 
-def risk_descriptor(row: Dict[str, Any]) -> str:
-    v = row.get("vol", None)
-    try:
-        if v is not None and v != "":
+def risk_descriptor(row: Dict[str, Any], lane_name: str) -> str:
+    # For Crypto/FX/Options use vol (0..10). For Long Cycle we don't require it.
+    if lane_name != "Long Cycle":
+        v = row.get("vol", None)
+        try:
             vv = float(v)
-            if vv >= 7.0:  # NOTE: your vol is 0..10, so keep it consistent
+            if vv >= 7.0:
                 return "High"
             if vv >= 4.0:
                 return "Moderate"
             return "Low"
-    except Exception:
-        pass
+        except Exception:
+            pass
+
+    # fallback on regime words
     r = regime_descriptor(row.get("regime"))
-    if r == "Weak": return "High"
-    if r == "Neutral": return "Moderate"
+    if r == "Weak":
+        return "High"
+    if r == "Neutral":
+        return "Moderate"
     return "Low"
 
 def build_scorecard_rows(df: Optional[pd.DataFrame], lane_name: str) -> List[Dict[str, Any]]:
     if df is None or df.empty:
         return []
+    score_col = "phase4" if lane_name == "Long Cycle" else "ssi"
+
     rows: List[Dict[str, Any]] = []
     for _, r in df.iterrows():
         sym = r.get("symbol", None)
         if sym is None or str(sym).strip() == "":
             continue
+
         status = str(r.get("status", "ok")).lower().strip()
         try:
-            score = float(r.get("ssi", 0) or 0)
+            score = float(r.get(score_col, 0) or 0)
         except Exception:
             score = 0.0
 
         row_dict = r.to_dict() if hasattr(r, "to_dict") else dict(r)
+
         rows.append(
             {
                 "Ticker": str(sym).upper(),
                 "SSI-Grade": ssi_grade(score),
                 "Confidence": confidence_descriptor(score),
-                "Risk": risk_descriptor(row_dict),
+                "Risk": risk_descriptor(row_dict, lane_name),
                 "Regime": regime_descriptor(r.get("regime")),
-                "Universe": "SSI Core Universe" if (status == "ok" and score >= 7.0) else "SSI Extended Universe",
+                "Universe": "Core" if (status == "ok" and score >= 7.0) else "Extended",
                 "_lane": lane_name,
                 "_score": score,
                 "_status": status,
@@ -366,8 +355,42 @@ def build_scorecard_rows(df: Optional[pd.DataFrame], lane_name: str) -> List[Dic
         )
     return rows
 
+def lane_status_from_df(df: Optional[pd.DataFrame], lane_name: str) -> str:
+    if lane_name == "Options" and is_weekend_ny():
+        return "Closed (Weekend)"
+    if df is None or df.empty:
+        return "No Data"
+    top = df.iloc[0]
+    if str(top.get("status", "")).lower() != "ok":
+        return "No Data"
+
+    score_col = "phase4" if lane_name == "Long Cycle" else "ssi"
+    try:
+        score_val = float(top.get(score_col, 0))
+    except Exception:
+        score_val = 0.0
+
+    return "Active" if score_val >= 7 else "Stand Down"
+
+def show_lane(title: str, df: Optional[pd.DataFrame], lane_name: str):
+    st.subheader(title)
+    if df is None or df.empty:
+        st.warning("No data available.")
+        return
+
+    reco = str(df.iloc[0].get("reco", "") or "").strip()
+    if reco:
+        st.success(reco)
+
+    if lane_name == "Long Cycle":
+        cols = [c for c in ["symbol", "last", "phase4", "regime"] if c in df.columns]
+    else:
+        cols = [c for c in ["symbol", "last", "trend", "vol", "ssi", "regime"] if c in df.columns]
+
+    st.dataframe(df[cols] if cols else df, use_container_width=True, hide_index=True)
+
 # =========================================================
-# DAILY CADENCE CACHE
+# CACHE (DAILY)
 # =========================================================
 @st.cache_data(show_spinner=False)
 def run_scan_for_date(ny_date: str) -> Dict[str, Any]:
@@ -380,7 +403,7 @@ def get_scan_result(force_refresh: bool) -> Dict[str, Any]:
     return run_scan_for_date(key)
 
 # =========================================================
-# HEADER + RUN
+# HEADER
 # =========================================================
 st.title("SSI Market Decision Engine")
 st.caption("Public doctrine. Private engine. Institution-ready output.")
@@ -408,13 +431,13 @@ banner = str(res.get("risk_banner", "Unknown") or "Unknown")
 crypto_df = res.get("crypto")
 fx_df = res.get("fx")
 opt_df = res.get("options")
-lc_df = res.get("lc")  # <-- NEW (engine must provide this for LC to populate)
+lc_df = res.get("lc")
 
 # =========================================================
 # PUBLIC SCORECARD (FREE)
 # =========================================================
 st.markdown("## SSI Daily Legitimacy Scorecard")
-st.caption("Free to read. Platform embedding, bulk usage, or redistribution is licensed.")
+st.caption("Free to read. Embedding / redistribution is licensed.")
 
 scorecard_rows: List[Dict[str, Any]] = []
 scorecard_rows += build_scorecard_rows(crypto_df, "Crypto")
@@ -428,7 +451,7 @@ if scorecard_df.empty:
 else:
     scorecard_df = scorecard_df.sort_values(by=["_score"], ascending=False)
     scorecard_df = scorecard_df.drop_duplicates(subset=["Ticker"], keep="first")
-    scorecard_df["UniverseRank"] = scorecard_df["Universe"].apply(lambda x: 0 if "Core" in x else 1)
+    scorecard_df["UniverseRank"] = scorecard_df["Universe"].apply(lambda x: 0 if x == "Core" else 1)
     scorecard_df = scorecard_df.sort_values(by=["UniverseRank", "_score"], ascending=[True, False])
     show_cols = ["Ticker", "SSI-Grade", "Confidence", "Risk", "Regime", "Universe"]
     st.dataframe(scorecard_df[show_cols], use_container_width=True, hide_index=True)
@@ -462,14 +485,11 @@ st.dataframe(status_df, use_container_width=True, hide_index=True)
 st.divider()
 
 # =========================================================
-# ADMIN BYPASS (OPTIONAL)
+# AUTH GATE
 # =========================================================
 admin_code = get_query_param("admin")
 ADMIN_CODE_OK = bool(SSI_ADMIN_CODE) and (admin_code == SSI_ADMIN_CODE)
 
-# =========================================================
-# AUTH GATE (DASHBOARDS)
-# =========================================================
 token = get_query_param("ms")
 
 if ADMIN_CODE_OK:
@@ -478,7 +498,7 @@ if ADMIN_CODE_OK:
     selected_lanes = LANES_ALL[:]
     member_email = "ADMIN"
     member_id = None
-    st.success("✅ Admin access enabled (code)")
+    st.success("✅ Admin access enabled")
 else:
     if not token:
         st.markdown("## Unlock dashboards")
@@ -497,12 +517,12 @@ else:
         st.stop()
 
     if token and not MEMBERSTACK_API_KEY:
-        st.error("Server is missing MEMBERSTACK_API_KEY. Add it in Render environment variables.")
+        st.error("Missing MEMBERSTACK_API_KEY in Render environment variables.")
         st.stop()
 
     member_payload = verify_memberstack_token(token)
     if not member_payload:
-        st.error("Your login token could not be verified. Please log in again.")
+        st.error("Login token could not be verified. Please log in again.")
         if LOGIN_URL:
             st.link_button("Log in", LOGIN_URL)
         st.stop()
@@ -515,7 +535,7 @@ else:
     member_email_raw = get_member_email(member_payload) or ""
     member_email = member_email_raw.strip().lower() if member_email_raw else None
 
-    # Admin override (email OR member id)
+    # Admin override
     if (member_email and member_email in SSI_ADMIN_EMAILS) or (member_id and member_id in SSI_ADMIN_MEMBER_IDS):
         tier = "Black"
         max_lanes = 4
@@ -534,28 +554,30 @@ else:
         )
 
     if max_lanes == 0:
-        st.warning("You are logged in, but you don't have an active plan that unlocks dashboards.")
+        st.warning("You are logged in, but you don’t have an active plan that unlocks dashboards.")
         if PLANS_URL:
             st.link_button("Choose a plan", PLANS_URL)
         st.stop()
 
     selected_lanes = get_selected_lanes_from_payload(member_payload)
 
+    # Black = all lanes (and we persist that)
     if tier == "Black":
         selected_lanes = LANES_ALL[:]
         if member_id:
             update_member_custom_fields(member_id, {CUSTOMFIELD_SELECTED_LANES: selected_lanes})
     else:
+        # Trim if they somehow have too many saved
         if len(selected_lanes) > max_lanes and member_id:
             trimmed = selected_lanes[:max_lanes]
-            ok = update_member_custom_fields(member_id, {CUSTOMFIELD_SELECTED_LANES: trimmed})
-            if ok:
+            if update_member_custom_fields(member_id, {CUSTOMFIELD_SELECTED_LANES: trimmed}):
                 selected_lanes = trimmed
 
     needs_selection = (tier in ("Starter", "Pro")) and (len(selected_lanes) == 0)
+
     if tier in ("Starter", "Pro"):
         with st.expander("⚙️ Manage lanes", expanded=needs_selection):
-            st.subheader("Configure your engine")
+            st.subheader("Configure your lanes")
             st.caption("Pick which dashboards you want to unlock. You can change this anytime.")
             pick = st.multiselect(
                 label=f"Select up to {max_lanes}",
@@ -589,7 +611,7 @@ else:
 # =========================================================
 st.divider()
 st.markdown("## Score any symbol (on-demand)")
-st.caption("Type any ticker or pair. LC only accepts US equities tickers (no -USD or =X).")
+st.caption("Type any ticker or pair. Long Cycle is US equities tickers only (no -USD or =X).")
 
 def _is_valid_lc_symbol(sym: str) -> bool:
     s = sym.strip().upper()
@@ -597,7 +619,6 @@ def _is_valid_lc_symbol(sym: str) -> bool:
         return False
     if "-USD" in s or "=X" in s:
         return False
-    # basic sanity: allow letters, numbers, dash, dot
     return bool(re.fullmatch(r"[A-Z0-9\.\-]{1,15}", s))
 
 with st.expander("Score a symbol now", expanded=False):
@@ -615,19 +636,16 @@ with st.expander("Score a symbol now", expanded=False):
             if lane_choice == "Long Cycle" and not _is_valid_lc_symbol(sym):
                 st.error("Long Cycle only accepts US equities tickers (example: NVDA).")
             else:
-                label_map = {
-                    "Crypto": "CRYPTO",
-                    "Forex": "FOREX",
-                    "Options": "OPTIONS",
-                    "Long Cycle": "LC",
-                }
-                label = label_map.get(lane_choice, "LC")
-
                 try:
-                    # Uses engine's internal scorer. Works today without needing new APIs.
-                    row = engine._score_symbol(label, sym)  # type: ignore[attr-defined]
-                    df = pd.DataFrame([row])
-                    show_lane(f"On-demand — {lane_choice}", df)
+                    if lane_choice == "Long Cycle":
+                        row = engine._score_symbol_lc(sym)  # type: ignore[attr-defined]
+                        df = pd.DataFrame([row])
+                        show_lane(f"On-demand — {lane_choice}", df, "Long Cycle")
+                    else:
+                        label_map = {"Crypto": "CRYPTO", "Forex": "FOREX", "Options": "OPTIONS"}
+                        row = engine._score_symbol(label_map[lane_choice], sym)  # type: ignore[attr-defined]
+                        df = pd.DataFrame([row])
+                        show_lane(f"On-demand — {lane_choice}", df, lane_choice)
                 except Exception as e:
                     st.error(f"Could not score {sym}. Error: {e}")
 
@@ -651,7 +669,7 @@ for i, lane in enumerate(selected_lanes):
         df = lane_to_df.get(lane)
         if lane == "Options" and is_weekend_ny():
             st.info("Options markets are closed on weekends. Data may reflect the last session.")
-        show_lane(f"{lane} Lane", df)
+        show_lane(f"{lane} Lane", df, lane)
 
 st.divider()
 st.markdown("### Reminder")
