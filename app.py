@@ -392,7 +392,7 @@ def show_lane(title: str, df: Optional[pd.DataFrame], lane_name: str):
 # =========================================================
 # CACHE (DAILY)
 # =========================================================
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=900)  # 15 min
 def run_scan_for_date(ny_date: str) -> Dict[str, Any]:
     return engine.run_full_scan()
 
