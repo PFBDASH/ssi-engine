@@ -486,8 +486,9 @@ def _score_symbol(label: str, symbol: str) -> Dict[str, Any]:
 # =========================================================
 # Scoring (Long Cycle / LC) — uses Stooq (NOT yfinance)
 # =========================================================
-def _score_symbol_lc(symbol: str, benchmark_symbol: str = "SPY") -> Dict[str, Any]:
-    df = _fetch_equity_stooq(symbol, days_hint=900)
+def _score_symbol_lc(symbol: str, benchmark_df: pd.DataFrame | None = None) -> dict:
+    # pull more history for LC / Phase-4
+    df = _fetch_history(symbol, days=900, interval="1d")
     close = _get_close_series(df)
 
     if close.empty or len(close) < 260:
@@ -501,10 +502,9 @@ def _score_symbol_lc(symbol: str, benchmark_symbol: str = "SPY") -> Dict[str, An
             "status": "no_data",
         }
 
-    bench = _fetch_equity_stooq(benchmark_symbol, days_hint=900)
     last = float(close.iloc[-1])
 
-    phase4_score, _details = _score_phase4(df, bench)
+    phase4_score, _details = _score_phase4(df, benchmark_df)
     regime = _phase4_label(phase4_score)
     reco = _lane_reco_lc(symbol, phase4_score)
 
@@ -554,14 +554,7 @@ def run_options_scan() -> pd.DataFrame:
 
 
 def run_lc_scan() -> pd.DataFrame:
-    """
-    Lane 4 symbols can be defined in universe.py as any of:
-      - LC
-      - LC_UNIVERSE
-      - LONG_CYCLE
-      - WEALTH
-    """
-    lc: List[str] = []
+    lc = []
     for name in ("LC", "LC_UNIVERSE", "LONG_CYCLE", "WEALTH"):
         if hasattr(universe, name):
             try:
