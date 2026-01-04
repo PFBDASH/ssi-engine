@@ -684,3 +684,15 @@ with col2:
         st.link_button("Account / Login", LOGIN_URL, use_container_width=True)
 with col3:
     st.markdown('<span class="smallmuted">Tip: bookmark this page after login.</span>', unsafe_allow_html=True)
+    
+    st.markdown(
+    """
+    <hr style="margin-top:40px;">
+    <div style="font-size:12px; color:#888; text-align:center;">
+      <a href="https://ssi-auth.webflow.io/terms" target="_blank">Terms of Service</a> |
+      <a href="https://ssi-auth.webflow.io/regulatory" target="_blank">Regulatory Positioning</a> |
+      <a href="https://ssi-auth.webflow.io/constitution" target="_blank">SSI Constitution</a>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
