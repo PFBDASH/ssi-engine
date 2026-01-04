@@ -486,9 +486,8 @@ def _score_symbol(label: str, symbol: str) -> Dict[str, Any]:
 # Scoring (Long Cycle / LC) — uses Stooq (NOT yfinance)
 # =========================================================
 def _score_symbol_lc(symbol: str, benchmark_df: pd.DataFrame | None = None) -> dict:
-    try:
-        df = _fetch_equity_stooq(symbol)
-        close = _get_close_series(df)
+    df = _fetch_equity_stooq(symbol)   # <-- this line
+    close = _get_close_series(df)
 
         if close.empty or len(close) < 260:
             return {
