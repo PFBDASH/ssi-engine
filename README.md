@@ -91,3 +91,29 @@ Black tier auto-unlocks all lanes.
 ## Deployment
 
 Render compatible:
+
+web: streamlit run app.py –server.port=$PORT –server.address=0.0.0.0
+
+---
+
+## Required Environment Variables
+
+| Variable |
+|--------|
+| MEMBERSTACK_API_KEY |
+| WEBFLOW_BASE_URL |
+| WEBFLOW_LOGIN_PATH |
+| WEBFLOW_PLANS_PATH |
+| SSI_ADMIN_EMAILS |
+| SSI_ADMIN_CODE |
+
+---
+
+## Philosophy
+
+Markets move in regimes.
+Capital moves before price.
+SSI exists to see that movement before it becomes obvious.
+
+You are now running a legitimate institutional-style market intelligence platform.
+This is no longer a side project.
