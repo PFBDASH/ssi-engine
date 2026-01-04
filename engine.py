@@ -4,9 +4,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 import universe
+from data_sources import fetch_crypto_ohlc, fetch_fx_daily, fetch_equity_daily
 
 
 # -----------------------------
@@ -20,16 +20,32 @@ def _now_utc() -> datetime:
 # Data normalization
 # -----------------------------
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize incoming OHLCV frames into:
+      index = DatetimeIndex
+      columns include: Open, High, Low, Close, Volume (optional)
+    """
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = df.copy()
 
-    # MultiIndex -> keep first level (Close/High/Low etc)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    # If we got a "time" column, set index from it
+    if "time" in df.columns:
+        try:
+            df["time"] = pd.to_datetime(df["time"])
+            df = df.set_index("time")
+        except Exception:
+            pass
 
-    # Normalize names (case + Adj Close)
+    # Ensure DatetimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df.index = pd.to_datetime(df.index)
+        except Exception:
+            return pd.DataFrame()
+
+    # Normalize column names
     rename = {}
     for c in df.columns:
         cl = str(c).strip().lower()
@@ -43,31 +59,22 @@ def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
             rename[c] = "Close"
         elif cl == "volume":
             rename[c] = "Volume"
+
     df = df.rename(columns=rename)
 
-    # If we ended up with duplicate columns named "Close" etc, keep the first occurrence
+    # If duplicates, keep first
     df = df.loc[:, ~df.columns.duplicated()]
-
-    # Ensure DatetimeIndex
-    if not isinstance(df.index, pd.DatetimeIndex):
-        try:
-            df.index = pd.to_datetime(df.index)
-        except Exception:
-            return pd.DataFrame()
 
     # Require Close
     if "Close" not in df.columns:
         return pd.DataFrame()
 
+    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
     df = df.dropna(subset=["Close"])
     return df
 
 
 def _get_close_series(df: pd.DataFrame) -> pd.Series:
-    """
-    Guarantee a 1D Series for Close.
-    Handles cases where df["Close"] returns a DataFrame due to duplicates.
-    """
     if df is None or df.empty or "Close" not in df.columns:
         return pd.Series(dtype=float)
 
@@ -82,20 +89,69 @@ def _get_close_series(df: pd.DataFrame) -> pd.Series:
 def _get_volume_series(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty or "Volume" not in df.columns:
         return pd.Series(dtype=float)
+
     v = df["Volume"]
     if isinstance(v, pd.DataFrame):
         v = v.iloc[:, 0]
+
     v = pd.to_numeric(v, errors="coerce").dropna()
     return v
 
 
+# -----------------------------
+# Data fetch (NO yfinance)
+# -----------------------------
 def _fetch_history(symbol: str, days: int = 240, interval: str = "1d") -> pd.DataFrame:
+    """
+    Routes symbols to your owned data stack:
+      - Crypto: Kraken OHLC (expects BTCUSD format internally)
+      - Forex: Stooq daily CSV (expects EURUSD)
+      - Equities: Stooq daily CSV (expects SPY, NVDA, etc)
+
+    NOTE: your Stooq helpers currently return tail(350). So requesting >350
+    will still cap at ~350 bars unless you later expand data_sources.py.
+    """
     try:
-        end = _now_utc()
-        start = end - timedelta(days=days)
-        t = yf.Ticker(symbol)
-        df = t.history(start=start, end=end, interval=interval, auto_adjust=False)
-        return _flatten_columns(df)
+        # Crypto lane uses "BTC-USD" style tickers
+        if "-USD" in symbol:
+            # engine uses BTC-USD; data_sources expects BTCUSD / ETHUSD / SOLUSD
+            kraken_sym = symbol.replace("-", "").replace("USD", "USD")  # "BTCUSD"
+            # For daily-ish cadence, ask Kraken for 1440-minute bars
+            raw = fetch_crypto_ohlc(kraken_sym, interval=1440)
+            df = raw.rename(
+                columns={
+                    "open": "Open",
+                    "high": "High",
+                    "low": "Low",
+                    "close": "Close",
+                    "volume": "Volume",
+                }
+            )
+            df = _flatten_columns(df)
+
+        # Forex lane uses "EURUSD=X" style tickers
+        elif "=X" in symbol:
+            stooq_sym = symbol.replace("=X", "")
+            raw = fetch_fx_daily(stooq_sym)
+            df = raw.rename(
+                columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"}
+            )
+            df = _flatten_columns(df)
+
+        # Options + LC are US equities / ETFs
+        else:
+            raw = fetch_equity_daily(symbol)
+            df = raw.rename(
+                columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"}
+            )
+            df = _flatten_columns(df)
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # Respect requested lookback as best we can
+        return df.tail(max(1, int(days))).copy()
+
     except Exception:
         return pd.DataFrame()
 
@@ -104,7 +160,6 @@ def _fetch_history(symbol: str, days: int = 240, interval: str = "1d") -> pd.Dat
 # Indicators
 # -----------------------------
 def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    # fallback if High/Low missing
     if not {"High", "Low", "Close"}.issubset(df.columns):
         c = _get_close_series(df)
         if c.empty:
@@ -119,21 +174,13 @@ def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
     prev_close = close.shift(1)
     tr = pd.concat(
-        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1
+        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1
     ).max(axis=1)
     return tr.rolling(period).mean()
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
-
-
-def _safe_last(x: pd.Series) -> float:
-    try:
-        return float(x.iloc[-1])
-    except Exception:
-        return float("nan")
 
 
 def _score_trend(df: pd.DataFrame) -> tuple[float, dict]:
@@ -192,12 +239,9 @@ def _regime_label(trend_score: float, vol_score: float) -> str:
 
 
 # -----------------------------
-# Lane 4: Long Cycle / Phase-4 (Wealth Launchpad)
+# Lane 4: Long Cycle / Phase-4
 # -----------------------------
 def _map_linear(x: float, x0: float, x1: float, y0: float = 0.0, y1: float = 10.0) -> float:
-    """
-    Map x from [x0, x1] -> [y0, y1], clamp at ends.
-    """
     if x1 == x0:
         return y0
     t = (x - x0) / (x1 - x0)
@@ -206,35 +250,23 @@ def _map_linear(x: float, x0: float, x1: float, y0: float = 0.0, y1: float = 10.
 
 
 def _score_phase4(df: pd.DataFrame, benchmark_df: pd.DataFrame | None = None) -> tuple[float, dict]:
-    """
-    Phase-4 detection is not "trend chasing".
-    It favors:
-      - long base / compression
-      - volatility + volume drying up
-      - stealth relative strength vs market
-      - price not extended (still near its long base)
-    Output score: 0..10
-    """
     close = _get_close_series(df)
     vol = _get_volume_series(df)
 
+    # We need ~1y base. With your current Stooq tail(350), this is OK.
     if close.empty or len(close) < 260:
         return 0.0, {"reason": "insufficient_bars"}
 
-    # Windows
     w_base = 252   # ~1y
     w_mid = 126    # ~6m
     w_short = 20   # ~1m
 
     c_base = close.iloc[-w_base:]
     c_mid = close.iloc[-w_mid:]
-    c_short = close.iloc[-w_short:]
-
     price = float(close.iloc[-1])
 
-    # 1) Base compression: 1y range % (lower is better)
+    # 1) Base compression: 1y range %
     rng_pct = (float(c_base.max()) - float(c_base.min())) / max(1e-9, float(c_base.mean()))
-    # Good: ~0.15 or less. Bad: ~0.60+
     base_score = 10.0 - _map_linear(rng_pct, 0.15, 0.60, 0.0, 10.0)
 
     # 2) Volatility drying: short ATR% vs base ATR%
@@ -245,10 +277,9 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: pd.DataFrame | None = None) ->
     atrp_short = float(atr.iloc[-w_short:].mean()) / max(1e-9, price)
     atrp_base = float(atr.iloc[-w_base:].mean()) / max(1e-9, float(c_base.mean()))
     vol_ratio = atrp_short / max(1e-9, atrp_base)
-    # Good: 0.55-0.75, bad: 1.2+
     voldry_score = 10.0 - _map_linear(vol_ratio, 0.60, 1.25, 0.0, 10.0)
 
-    # 3) Volume drying (optional; if volume missing, neutral 5)
+    # 3) Volume drying (neutral if missing)
     if vol.empty or len(vol) < w_base:
         vdry_score = 5.0
         v_ratio = float("nan")
@@ -256,26 +287,25 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: pd.DataFrame | None = None) ->
         v_base = float(vol.iloc[-w_base:].mean())
         v_short = float(vol.iloc[-w_short:].mean())
         v_ratio = v_short / max(1e-9, v_base)
-        # Good: <0.70, bad: >1.10
         vdry_score = 10.0 - _map_linear(v_ratio, 0.70, 1.10, 0.0, 10.0)
 
-    # 4) Relative strength vs market (SPY by default if provided)
+    # 4) Relative strength vs benchmark over ~6m
     rs_score = 5.0
     rs_delta = float("nan")
     if benchmark_df is not None and not benchmark_df.empty:
         b_close = _get_close_series(benchmark_df)
-        if len(b_close) >= w_mid and len(close) >= w_mid:
+        if len(b_close) >= w_mid:
             sym_ret = float(c_mid.iloc[-1] / c_mid.iloc[0] - 1.0)
-            b_ret = float(b_close.iloc[-w_mid:][ -1 ] / b_close.iloc[-w_mid:][ 0 ] - 1.0)
+            b_mid = b_close.iloc[-w_mid:]
+            b_ret = float(b_mid.iloc[-1] / b_mid.iloc[0] - 1.0)
             rs_delta = sym_ret - b_ret
-            # Good: +10% outperformance, bad: -10% underperformance
             rs_score = _map_linear(rs_delta, -0.10, 0.10, 0.0, 10.0)
 
-    # 5) Not extended: prefer price near top of base but not a blow-off
+    # 5) Not extended: prefer near upper base but not blow-off
     base_high = float(c_base.max())
     base_low = float(c_base.min())
     pos = (price - base_low) / max(1e-9, (base_high - base_low))  # 0..1
-    # Ideal pos is ~0.60-0.85 (tight, near upper range). Too low = dead. Too high = breaking out hard.
+
     if pos < 0.60:
         extent_score = _map_linear(pos, 0.20, 0.60, 0.0, 10.0)
     elif pos <= 0.85:
@@ -283,7 +313,6 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: pd.DataFrame | None = None) ->
     else:
         extent_score = 10.0 - _map_linear(pos, 0.85, 1.00, 0.0, 10.0)
 
-    # Weighted blend
     score = (
         0.26 * base_score +
         0.22 * voldry_score +
@@ -296,8 +325,6 @@ def _score_phase4(df: pd.DataFrame, benchmark_df: pd.DataFrame | None = None) ->
     details = {
         "range_pct_1y": float(rng_pct),
         "vol_ratio": float(vol_ratio),
-        "vol_short_atrp": float(atrp_short),
-        "vol_base_atrp": float(atrp_base),
         "volume_ratio": float(v_ratio) if not np.isnan(v_ratio) else None,
         "rs_delta_6m": float(rs_delta) if not np.isnan(rs_delta) else None,
         "base_position": float(pos),
@@ -458,8 +485,8 @@ def _score_symbol(label: str, symbol: str) -> dict:
 
 
 def _score_symbol_lc(symbol: str, benchmark_symbol: str = "SPY") -> dict:
-    # pull more history for LC / Phase-4
-    df = _fetch_history(symbol, days=900, interval="1d")
+    # With current data_sources tail(350), LC should use <=350 bars.
+    df = _fetch_history(symbol, days=350, interval="1d")
     close = _get_close_series(df)
 
     if close.empty or len(close) < 260:
@@ -473,7 +500,7 @@ def _score_symbol_lc(symbol: str, benchmark_symbol: str = "SPY") -> dict:
             "status": "no_data",
         }
 
-    bench = _fetch_history(benchmark_symbol, days=900, interval="1d")
+    bench = _fetch_history(benchmark_symbol, days=350, interval="1d")
     last = float(close.iloc[-1])
 
     phase4_score, _details = _score_phase4(df, bench)
@@ -529,7 +556,6 @@ def run_lc_scan() -> pd.DataFrame:
       - LC_UNIVERSE
       - LONG_CYCLE
       - WEALTH
-    This function will work even before you add it (it will just be empty).
     """
     lc = []
     for name in ("LC", "LC_UNIVERSE", "LONG_CYCLE", "WEALTH"):
@@ -548,15 +574,14 @@ def run_full_scan() -> dict:
     opts = run_options_scan()
     lc = run_lc_scan()
 
-    def best_ssi(df: pd.DataFrame, col: str) -> float:
+    def best_score(df: pd.DataFrame, col: str) -> float:
         if df is None or df.empty or col not in df.columns:
             return 0.0
         x = pd.to_numeric(df[col], errors="coerce").dropna()
         return float(x.iloc[0]) if len(x) else 0.0
 
-    # headline across 4 lanes (LC uses "phase4")
     headline = round(
-        (best_ssi(crypto, "ssi") + best_ssi(fx, "ssi") + best_ssi(opts, "ssi") + best_ssi(lc, "phase4")) / 4.0,
+        (best_score(crypto, "ssi") + best_score(fx, "ssi") + best_score(opts, "ssi") + best_score(lc, "phase4")) / 4.0,
         2
     )
 
