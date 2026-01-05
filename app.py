@@ -117,32 +117,29 @@ def get_query_param(name: str) -> Optional[str]:
         return None
 
 # =========================================================
-# AUTHORITY FOOTER (SHOWS EVEN WHEN LOGGED OUT)
+# FOOTER (AUTHORITY + LEGAL) — call this only where needed
 # =========================================================
-st.divider()
-st.markdown("### SSI Institutional Authority")
+def render_authority_footer() -> None:
+    st.divider()
+    st.markdown("### SSI Institutional Authority")
 
-colA, colB, colC, colD, colE = st.columns(5)
+    colA, colB, colC, colD, colE = st.columns(5)
+    with colA:
+        st.link_button("Institutional Access", "https://ssi-ratings.com/institution", use_container_width=True)
+    with colB:
+        st.link_button("Pre-Trade Standard (PTQS)", "https://ssi-ratings.com/standard/ptqs", use_container_width=True)
+    with colC:
+        st.link_button("Terms of Service", "https://ssi-ratings.com/terms", use_container_width=True)
+    with colD:
+        st.link_button("SSI Constitution", "https://ssi-ratings.com/constitution", use_container_width=True)
+    with colE:
+        st.link_button("Regulatory Positioning", "https://ssi-ratings.com/regulatory", use_container_width=True)
 
-with colA:
-    st.link_button("Institutional Access", "https://ssi-ratings.com/institution", use_container_width=True)
+    st.caption(
+        "SSI Ratings is a market classification authority. SSI provides no investment advice. "
+        "Quiet availability: Open to strategic licensing partnerships and acquisition discussions."
+    )
 
-with colB:
-    st.link_button("Pre-Trade Standard (PTQS)", "https://ssi-ratings.com/standard/ptqs", use_container_width=True)
-
-with colC:
-    st.link_button("Terms of Service", "https://ssi-ratings.com/terms", use_container_width=True)
-
-with colD:
-    st.link_button("SSI Constitution", "https://ssi-ratings.com/constitution", use_container_width=True)
-
-with colE:
-    st.link_button("Regulatory Positioning", "https://ssi-ratings.com/regulatory", use_container_width=True)
-
-st.caption(
-    "SSI Ratings is a market classification authority. SSI provides no investment advice. "
-    "Quiet availability: Open to strategic licensing partnerships and acquisition discussions."
-)
 # =========================================================
 # MEMBERSTACK HELPERS
 # =========================================================
@@ -214,7 +211,6 @@ def get_member_id(payload: Dict[str, Any]) -> Optional[str]:
         v = m.get("id") or m.get("memberId")
         if isinstance(v, str) and v.strip():
             return v.strip()
-    # fallback regex
     text = json.dumps(payload)
     mm = re.search(r'"memberId"\s*:\s*"([^"]+)"', text)
     return mm.group(1) if mm else None
@@ -225,13 +221,11 @@ def get_member_email(payload: Dict[str, Any]) -> Optional[str]:
         v = m.get("email")
         if isinstance(v, str) and v.strip():
             return v.strip()
-    # fallback regex
     text = json.dumps(payload)
     mm = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text)
     return mm.group(0) if mm else None
 
 def extract_price_ids(payload: Dict[str, Any]) -> List[str]:
-    # simplest reliable: find prc_* anywhere
     text = json.dumps(payload)
     found = re.findall(r"prc_[a-zA-Z0-9\-_]+", text)
     out, seen = [], set()
@@ -251,7 +245,6 @@ def resolve_tier(price_ids: List[str]) -> str:
     return "Free"
 
 def allowed_lane_count(tier: str) -> int:
-    # Starter = 1 lane, Pro = 2 lanes, Black = 4 lanes
     if tier == "Starter":
         return 1
     if tier == "Pro":
@@ -326,7 +319,6 @@ def regime_descriptor(regime_value: Any) -> str:
     return "Neutral"
 
 def risk_descriptor(row: Dict[str, Any], lane_name: str) -> str:
-    # For Crypto/FX/Options use vol (0..10). For Long Cycle we don't require it.
     if lane_name != "Long Cycle":
         v = row.get("vol", None)
         try:
@@ -338,8 +330,6 @@ def risk_descriptor(row: Dict[str, Any], lane_name: str) -> str:
             return "Low"
         except Exception:
             pass
-
-    # fallback on regime words
     r = regime_descriptor(row.get("regime"))
     if r == "Weak":
         return "High"
@@ -542,7 +532,6 @@ else:
             else:
                 st.button("Choose a plan (set WEBFLOW_BASE_URL)", disabled=True, use_container_width=True)
 
-        # IMPORTANT: show footer even when user is logged out
         render_authority_footer()
         st.stop()
 
@@ -600,7 +589,6 @@ else:
         if member_id:
             update_member_custom_fields(member_id, {CUSTOMFIELD_SELECTED_LANES: selected_lanes})
     else:
-        # Trim if they somehow have too many saved
         if len(selected_lanes) > max_lanes and member_id:
             trimmed = selected_lanes[:max_lanes]
             if update_member_custom_fields(member_id, {CUSTOMFIELD_SELECTED_LANES: trimmed}):
@@ -706,5 +694,7 @@ for i, lane in enumerate(selected_lanes):
             st.info("Options markets are closed on weekends. Data may reflect the last session.")
         show_lane(f"{lane} Lane", df, lane)
 
-# Always show footer for logged-in users too
+# =========================================================
+# FOOTER ALWAYS AT THE BOTTOM
+# =========================================================
 render_authority_footer()
