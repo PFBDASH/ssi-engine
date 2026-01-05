@@ -671,31 +671,6 @@ for i, lane in enumerate(selected_lanes):
             st.info("Options markets are closed on weekends. Data may reflect the last session.")
         show_lane(f"{lane} Lane", df, lane)
 
-st.divider()
-st.markdown("### Reminder")
-st.caption("Conditions can shift quickly. Re-check before placing size.")
-
-col1, col2, col3 = st.columns([1, 1, 2])
-with col1:
-    if PLANS_URL:
-        st.link_button("Pricing / Plans", PLANS_URL, use_container_width=True)
-with col2:
-    if LOGIN_URL:
-        st.link_button("Account / Login", LOGIN_URL, use_container_width=True)
-with col3:
-    st.markdown('<span class="smallmuted">Tip: bookmark this page after login.</span>', unsafe_allow_html=True)
-    
-    st.markdown(
-    """
-    <hr style="margin-top:40px;">
-    <div style="font-size:12px; color:#888; text-align:center;">
-      <a href="https://ssi-auth.webflow.io/terms" target="_blank">Terms of Service</a> |
-      <a href="https://ssi-auth.webflow.io/regulatory" target="_blank">Regulatory Positioning</a> |
-      <a href="https://ssi-auth.webflow.io/constitution" target="_blank">SSI Constitution</a>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
 
 st.divider()
 st.markdown("### SSI Institutional Authority")
