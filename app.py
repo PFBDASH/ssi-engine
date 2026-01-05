@@ -117,6 +117,25 @@ def get_query_param(name: str) -> Optional[str]:
         return None
 
 # =========================================================
+# AUTHORITY FOOTER (SHOWS EVEN WHEN LOGGED OUT)
+# =========================================================
+def render_authority_footer():
+    st.divider()
+    st.markdown("### SSI Institutional Authority")
+
+    colA, colB, colC, colD = st.columns(4)
+    with colA:
+        st.link_button("Institutional Access", "https://ssi-ratings.com/institution", use_container_width=True)
+    with colB:
+        st.link_button("Terms of Service", "https://ssi-ratings.com/terms", use_container_width=True)
+    with colC:
+        st.link_button("SSI Constitution", "https://ssi-ratings.com/constitution", use_container_width=True)
+    with colD:
+        st.link_button("Regulatory Positioning", "https://ssi-ratings.com/regulatory", use_container_width=True)
+
+    st.caption("SSI Ratings is a market classification authority. SSI provides no investment advice.")
+
+# =========================================================
 # MEMBERSTACK HELPERS
 # =========================================================
 def _jwt_member_id(token: str) -> Optional[str]:
@@ -224,7 +243,6 @@ def resolve_tier(price_ids: List[str]) -> str:
     return "Free"
 
 def allowed_lane_count(tier: str) -> int:
-    # Locked model you stated:
     # Starter = 1 lane, Pro = 2 lanes, Black = 4 lanes
     if tier == "Starter":
         return 1
@@ -423,6 +441,7 @@ with st.spinner("Running scan…"):
 
 if not res:
     st.error("Scan failed. Try again.")
+    render_authority_footer()
     st.stop()
 
 headline_ssi = float(res.get("headline_ssi", 0.0) or 0.0)
@@ -514,10 +533,14 @@ else:
                 st.link_button("Choose a plan", PLANS_URL, use_container_width=True)
             else:
                 st.button("Choose a plan (set WEBFLOW_BASE_URL)", disabled=True, use_container_width=True)
+
+        # IMPORTANT: show footer even when user is logged out
+        render_authority_footer()
         st.stop()
 
     if token and not MEMBERSTACK_API_KEY:
         st.error("Missing MEMBERSTACK_API_KEY in Render environment variables.")
+        render_authority_footer()
         st.stop()
 
     member_payload = verify_memberstack_token(token)
@@ -525,6 +548,7 @@ else:
         st.error("Login token could not be verified. Please log in again.")
         if LOGIN_URL:
             st.link_button("Log in", LOGIN_URL)
+        render_authority_footer()
         st.stop()
 
     price_ids = extract_price_ids(member_payload)
@@ -557,6 +581,7 @@ else:
         st.warning("You are logged in, but you don’t have an active plan that unlocks dashboards.")
         if PLANS_URL:
             st.link_button("Choose a plan", PLANS_URL)
+        render_authority_footer()
         st.stop()
 
     selected_lanes = get_selected_lanes_from_payload(member_payload)
@@ -600,10 +625,12 @@ else:
 
         if needs_selection:
             st.warning("Choose your lane(s) above to unlock dashboards.")
+            render_authority_footer()
             st.stop()
 
     if not selected_lanes:
         st.warning("Choose your lane(s) to unlock dashboards.")
+        render_authority_footer()
         st.stop()
 
 # =========================================================
@@ -671,22 +698,5 @@ for i, lane in enumerate(selected_lanes):
             st.info("Options markets are closed on weekends. Data may reflect the last session.")
         show_lane(f"{lane} Lane", df, lane)
 
-
-st.divider()
-st.markdown("### SSI Institutional Authority")
-
-colA, colB, colC, colD = st.columns(4)
-
-with colA:
-    st.link_button("Institutional Access", "https://ssi-ratings.com/institution", use_container_width=True)
-
-with colB:
-    st.link_button("Terms of Service", "https://ssi-ratings.com/terms", use_container_width=True)
-
-with colC:
-    st.link_button("SSI Constitution", "https://ssi-ratings.com/constitution", use_container_width=True)
-
-with colD:
-    st.link_button("Regulatory Positioning", "https://ssi-ratings.com/regulatory", use_container_width=True)
-
-st.caption("SSI Ratings is a market classification authority. SSI provides no investment advice.")
+# Always show footer for logged-in users too
+render_authority_footer()
