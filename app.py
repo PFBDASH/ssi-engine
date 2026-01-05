@@ -139,7 +139,10 @@ with colD:
 with colE:
     st.link_button("Regulatory Positioning", "https://ssi-ratings.com/regulatory", use_container_width=True)
 
-st.caption("SSI Ratings is a market classification authority. SSI provides no investment advice.")
+st.caption(
+    "SSI Ratings is a market classification authority. SSI provides no investment advice. "
+    "Quiet availability: Open to strategic licensing partnerships and acquisition discussions."
+)
 # =========================================================
 # MEMBERSTACK HELPERS
 # =========================================================
