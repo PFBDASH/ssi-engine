@@ -462,6 +462,19 @@ def _lane_reco_lc(symbol: str, phase4: float) -> str:
 
 
 # =========================================================
+# Helpers: Universe / PTQS flags
+# =========================================================
+def _universe_from_score(status: str, score: float, threshold: float = 7.0) -> Tuple[str, bool]:
+    """
+    Core Universe: status ok AND score >= threshold
+    Extended Universe: everything else
+    """
+    ok = str(status or "").lower().strip() == "ok"
+    qualifies = bool(ok and float(score or 0.0) >= float(threshold))
+    return ("Core" if qualifies else "Extended"), qualifies
+
+
+# =========================================================
 # Scoring (Crypto/FX/Options)
 # =========================================================
 def _score_symbol(label: str, symbol: str) -> Dict[str, Any]:
@@ -469,6 +482,7 @@ def _score_symbol(label: str, symbol: str) -> Dict[str, Any]:
     close = _get_close_series(df)
 
     if close.empty or len(close) < 60:
+        universe_tag, qualifies = _universe_from_score("no_data", 0.0)
         return {
             "lane": label,
             "symbol": symbol,
@@ -478,6 +492,8 @@ def _score_symbol(label: str, symbol: str) -> Dict[str, Any]:
             "ssi": 0.0,
             "regime": "No Data",
             "reco": "",
+            "universe": universe_tag,
+            "qualifies_ptqs": qualifies,
             "status": "no_data",
         }
 
@@ -497,6 +513,8 @@ def _score_symbol(label: str, symbol: str) -> Dict[str, Any]:
     elif label == "OPTIONS":
         reco = _options_reco(symbol, last, trend_score, vol_score, ssi)
 
+    universe_tag, qualifies = _universe_from_score("ok", ssi)
+
     return {
         "lane": label,
         "symbol": symbol,
@@ -506,6 +524,8 @@ def _score_symbol(label: str, symbol: str) -> Dict[str, Any]:
         "ssi": round(ssi, 2),
         "regime": regime,
         "reco": reco,
+        "universe": universe_tag,
+        "qualifies_ptqs": qualifies,
         "status": "ok",
     }
 
@@ -519,6 +539,7 @@ def _score_symbol_lc(symbol: str, benchmark_df: Optional[pd.DataFrame] = None) -
         close = _get_close_series(df)
 
         if close.empty or len(close) < 260:
+            universe_tag, qualifies = _universe_from_score("no_data", 0.0)
             return {
                 "lane": "LC",
                 "symbol": symbol,
@@ -526,6 +547,8 @@ def _score_symbol_lc(symbol: str, benchmark_df: Optional[pd.DataFrame] = None) -
                 "phase4": 0.0,
                 "regime": "No Data",
                 "reco": "",
+                "universe": universe_tag,
+                "qualifies_ptqs": qualifies,
                 "status": "no_data",
             }
 
@@ -535,6 +558,8 @@ def _score_symbol_lc(symbol: str, benchmark_df: Optional[pd.DataFrame] = None) -
         regime = _phase4_label(phase4_score)
         reco = _lane_reco_lc(symbol, phase4_score)
 
+        universe_tag, qualifies = _universe_from_score("ok", phase4_score)
+
         return {
             "lane": "LC",
             "symbol": symbol,
@@ -542,10 +567,13 @@ def _score_symbol_lc(symbol: str, benchmark_df: Optional[pd.DataFrame] = None) -
             "phase4": round(phase4_score, 2),
             "regime": regime,
             "reco": reco,
+            "universe": universe_tag,
+            "qualifies_ptqs": qualifies,
             "status": "ok",
         }
     except Exception:
         # hard isolation: never let one LC ticker break the scan
+        universe_tag, qualifies = _universe_from_score("no_data", 0.0)
         return {
             "lane": "LC",
             "symbol": symbol,
@@ -553,6 +581,8 @@ def _score_symbol_lc(symbol: str, benchmark_df: Optional[pd.DataFrame] = None) -
             "phase4": 0.0,
             "regime": "No Data",
             "reco": "",
+            "universe": universe_tag,
+            "qualifies_ptqs": qualifies,
             "status": "no_data",
         }
 
@@ -564,13 +594,20 @@ def _run_lane(label: str, symbols: List[str]) -> pd.DataFrame:
     rows = [_score_symbol(label, s) for s in symbols]
     df = pd.DataFrame(rows)
     if df.empty:
-        return pd.DataFrame(columns=["lane", "symbol", "last", "trend", "vol", "ssi", "regime", "reco", "status"])
+        return pd.DataFrame(
+            columns=[
+                "lane", "symbol", "last", "trend", "vol", "ssi", "regime",
+                "reco", "universe", "qualifies_ptqs", "status"
+            ]
+        )
     return df.sort_values(by="ssi", ascending=False, kind="mergesort").reset_index(drop=True)
 
 
 def _run_lane_lc(symbols: List[str]) -> pd.DataFrame:
     if not symbols:
-        return pd.DataFrame(columns=["lane", "symbol", "last", "phase4", "regime", "reco", "status"])
+        return pd.DataFrame(
+            columns=["lane", "symbol", "last", "phase4", "regime", "reco", "universe", "qualifies_ptqs", "status"]
+        )
 
     # fetch benchmark once (if available)
     bench_symbol = getattr(universe, "LC_BENCHMARK", "SPY")
@@ -579,7 +616,9 @@ def _run_lane_lc(symbols: List[str]) -> pd.DataFrame:
     rows = [_score_symbol_lc(s, benchmark_df) for s in symbols]
     df = pd.DataFrame(rows)
     if df.empty:
-        return pd.DataFrame(columns=["lane", "symbol", "last", "phase4", "regime", "reco", "status"])
+        return pd.DataFrame(
+            columns=["lane", "symbol", "last", "phase4", "regime", "reco", "universe", "qualifies_ptqs", "status"]
+        )
     return df.sort_values(by="phase4", ascending=False, kind="mergesort").reset_index(drop=True)
 
 
