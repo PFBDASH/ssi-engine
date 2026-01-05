@@ -696,3 +696,22 @@ with col3:
     """,
     unsafe_allow_html=True
 )
+
+st.divider()
+st.markdown("### SSI Institutional Authority")
+
+colA, colB, colC, colD = st.columns(4)
+
+with colA:
+    st.link_button("Institutional Access", "https://ssi-ratings.com/institution", use_container_width=True)
+
+with colB:
+    st.link_button("Terms of Service", "https://ssi-ratings.com/terms", use_container_width=True)
+
+with colC:
+    st.link_button("SSI Constitution", "https://ssi-ratings.com/constitution", use_container_width=True)
+
+with colD:
+    st.link_button("Regulatory Positioning", "https://ssi-ratings.com/regulatory", use_container_width=True)
+
+st.caption("SSI Ratings is a market classification authority. SSI provides no investment advice.")
