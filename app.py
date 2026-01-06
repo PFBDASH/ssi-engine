@@ -26,6 +26,10 @@ SSI_ADMIN_EMAILS = [e.strip().lower() for e in os.getenv("SSI_ADMIN_EMAILS", "")
 SSI_ADMIN_MEMBER_IDS = [m.strip() for m in os.getenv("SSI_ADMIN_MEMBER_IDS", "").split(",") if m.strip()]
 SSI_ADMIN_CODE = os.getenv("SSI_ADMIN_CODE", "").strip()
 
+# UNIVERSAL VIP CODE (new)
+SSI_VIP_CODE = os.getenv("SSI_VIP_CODE", "").strip()
+SSI_VIP_EXPIRES = os.getenv("SSI_VIP_EXPIRES", "").strip()  # optional YYYY-MM-DD
+
 # Memberstack price IDs (YOUR IDs)
 PRICE_STARTER = "prc_ssi-starter-x54n0gfn"
 PRICE_PRO = "prc_ssi-pro-y54p0hul"
@@ -139,6 +143,26 @@ def render_authority_footer() -> None:
         "SSI Ratings is a market classification authority. SSI provides no investment advice. "
         "Quiet availability: Open to strategic licensing partnerships and acquisition discussions."
     )
+
+# =========================================================
+# VIP / ADMIN ACCESS (UNIVERSAL CODE)
+# =========================================================
+def _vip_not_expired() -> bool:
+    if not SSI_VIP_EXPIRES:
+        return True
+    try:
+        exp = datetime.strptime(SSI_VIP_EXPIRES, "%Y-%m-%d").date()
+        return datetime.now().date() <= exp
+    except Exception:
+        return True  # don't lock you out if formatting is wrong
+
+vip_code = get_query_param("vip") or get_query_param("admin")  # allow either param
+VIP_CODE_OK = bool(SSI_VIP_CODE) and (vip_code == SSI_VIP_CODE) and _vip_not_expired()
+
+admin_code = get_query_param("admin")
+ADMIN_CODE_OK = bool(SSI_ADMIN_CODE) and (admin_code == SSI_ADMIN_CODE)
+
+ADMIN_ACCESS = VIP_CODE_OK or ADMIN_CODE_OK
 
 # =========================================================
 # MEMBERSTACK HELPERS
@@ -504,9 +528,6 @@ st.divider()
 # =========================================================
 # AUTH GATE
 # =========================================================
-admin_code = get_query_param("admin")
-ADMIN_CODE_OK = bool(SSI_ADMIN_CODE) and (admin_code == SSI_ADMIN_CODE)
-
 token = get_query_param("ms")
 
 if ADMIN_CODE_OK:
