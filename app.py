@@ -154,15 +154,24 @@ def _vip_not_expired() -> bool:
         exp = datetime.strptime(SSI_VIP_EXPIRES, "%Y-%m-%d").date()
         return datetime.now().date() <= exp
     except Exception:
-        return True  # don't lock you out if formatting is wrong
+        # if expires format is wrong, fail OPEN so you don't lock yourself out
+        return True
 
-vip_code = get_query_param("vip") or get_query_param("admin")  # allow either param
-VIP_CODE_OK = bool(SSI_VIP_CODE) and (vip_code == SSI_VIP_CODE) and _vip_not_expired()
+# VIP accepts ?vip=CODE
+vip_code = (get_query_param("vip") or "").strip()
 
-admin_code = get_query_param("admin")
+# Admin can accept:
+# - old single-user admin: ?admin=SSI_ADMIN_CODE
+# - alias to VIP: ?admin=SSI_VIP_CODE (optional convenience)
+admin_code = (get_query_param("admin") or "").strip()
+
+VIP_CODE_OK = bool(SSI_VIP_CODE) and _vip_not_expired() and (vip_code == SSI_VIP_CODE or admin_code == SSI_VIP_CODE)
 ADMIN_CODE_OK = bool(SSI_ADMIN_CODE) and (admin_code == SSI_ADMIN_CODE)
 
 ADMIN_ACCESS = VIP_CODE_OK or ADMIN_CODE_OK
+
+# OPTIONAL: quick debug (uncomment temporarily if needed)
+# st.caption(f"DEBUG vip='{vip_code}' admin='{admin_code}' VIP_OK={VIP_CODE_OK} ADMIN_OK={ADMIN_CODE_OK} envVIP={'set' if bool(SSI_VIP_CODE) else 'MISSING'}")
 
 # =========================================================
 # MEMBERSTACK HELPERS
@@ -530,13 +539,13 @@ st.divider()
 # =========================================================
 token = get_query_param("ms")
 
-if ADMIN_CODE_OK:
+if ADMIN_ACCESS:
     tier = "Black"
     max_lanes = 4
     selected_lanes = LANES_ALL[:]
-    member_email = "ADMIN"
+    member_email = "VIP" if VIP_CODE_OK else "ADMIN"
     member_id = None
-    st.success("✅ Admin access enabled")
+    st.success("✅ VIP access enabled" if VIP_CODE_OK else "✅ Admin access enabled")
 else:
     if not token:
         st.markdown("## Unlock dashboards")
@@ -577,7 +586,7 @@ else:
     member_email_raw = get_member_email(member_payload) or ""
     member_email = member_email_raw.strip().lower() if member_email_raw else None
 
-    # Admin override
+    # Admin override by member identity
     if (member_email and member_email in SSI_ADMIN_EMAILS) or (member_id and member_id in SSI_ADMIN_MEMBER_IDS):
         tier = "Black"
         max_lanes = 4
