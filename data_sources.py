@@ -130,4 +130,5 @@ def fetch_equity_daily(ticker: str) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["close"])
 
-    return df.tail(350).reset_index(drop=True)
+    # IMPORTANT: bump history depth so LC/Phase-4 has enough bars
+    return df.tail(900).reset_index(drop=True)
